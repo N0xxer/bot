@@ -1,0 +1,48 @@
+{
+    "deputy_of_seim": {
+        "name": "Депутат Сейма",
+        "description": "",
+        "income": 42000
+    },
+
+    "member_of_supreme_court": {
+        "name": "Член Верховного суда",
+        "description": "",
+        "income": 55000
+    },
+    "president_of_rezendia": {
+        "name": "Президент Резендии",
+        "description": "",
+        "income": 80000
+    },
+    "vice_president_of_rezendia": {
+        "name": "Вице-Президент Резендии",
+        "description": "",
+        "income": 65000
+    },
+    "speaker_of_seim": {
+        "name": "Спикер Сейма",
+        "description": "",
+        "income": 50000
+    },
+    "cabinet_of_minister": {
+        "name": "Кабинет Министров",
+        "description": "",
+        "income": 55000
+    },
+    "heads_of_regions": {
+        "name": "Главы Земель",
+        "description": "",
+        "income": 45000
+    },
+    "honorary_citizen": {
+        "name": "Почетный Гражданин",
+        "description": "",
+        "income": 22000
+    },
+    "journalist": {
+        "name": "Журналист",
+        "description": "",
+        "income": 22000
+    }
+}
