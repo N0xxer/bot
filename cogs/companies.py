@@ -113,18 +113,19 @@ class CompaniesCog(commands.Cog):
                 title="❌ Недостаточно средств",
                 description=(
                     f"У {пользователь.mention} недостаточно средств для создания компании типа **{company_type}**.\n\n"
-                    f"• Требуется: `{format_number(cost)}` R$\n"
-                    f"• На балансе: `{format_number(owner_balance)}` R$"
+                    f"• Требуется: R$ `{format_number(cost)}`\n"
+                    f"• На балансе: R$ `{format_number(owner_balance)}`"
                 ),
                 color=disnake.Color.red()
             )
             return await inter.edit_original_message(embed=embed)
 
-        # 3. Получение категории
+        # 3. Получение родительской категории
         if company_type == "СМИ":
             category = inter.guild.get_channel(MEDIA_CATEGORY_ID)
         else:
             category = inter.guild.get_channel(COMPANY_CATEGORY_ID)
+
         if not isinstance(category, disnake.CategoryChannel):
             embed = create_embed(
                 title="❌ Ошибка конфигурации",
@@ -133,46 +134,83 @@ class CompaniesCog(commands.Cog):
             )
             return await inter.edit_original_message(embed=embed)
 
-        # 4. Настройка прав доступа для канала-форума
-        # @everyone: может только читать и просматривать посты
-        # Владелец: может создавать ветки/посты и отправлять сообщения
-        overwrites = {
-            inter.guild.default_role: disnake.PermissionOverwrite(
-                view_channel=True,
-                read_message_history=True,
-                create_public_threads=False,
-                create_private_threads=False,
-                send_messages_in_threads=False,
-                send_messages=False
-            ),
-            пользователь: disnake.PermissionOverwrite(
-                view_channel=True,
-                read_message_history=True,
-                create_public_threads=True,
-                send_messages_in_threads=True,
-                send_messages=True
-            )
-        }
+        # 4. Настройка прав доступа и создание канала
+        # Для СМИ — текстовый канал (create_text_channel), для Бизнеса/НКО — форум (create_forum_channel)
+        if company_type == "СМИ":
+            overwrites = {
+                inter.guild.default_role: disnake.PermissionOverwrite(
+                    view_channel=True,
+                    read_message_history=True,
+                    send_messages=False,
+                    create_public_threads=False,
+                    create_private_threads=False
+                ),
+                пользователь: disnake.PermissionOverwrite(
+                    view_channel=True,
+                    read_message_history=True,
+                    send_messages=True,
+                    attach_files=True,
+                    embed_links=True
+                )
+            }
+            try:
+                channel = await category.create_text_channel(
+                    name=f"📰・{название}",
+                    overwrites=overwrites,
+                    topic=f"СМИ «{название}». Владелец: {пользователь.display_name} | Тип: {company_type}"
+                )
+            except Exception as e:
+                embed = create_embed(
+                    title="❌ Ошибка при создании канала",
+                    description=f"Не удалось создать текстовый канал СМИ. Проверьте права бота.\n`{e}`",
+                    color=disnake.Color.red()
+                )
+                return await inter.edit_original_message(embed=embed)
+        else:
+            overwrites = {
+                inter.guild.default_role: disnake.PermissionOverwrite(
+                    view_channel=True,
+                    read_message_history=True,
+                    create_public_threads=False,
+                    create_private_threads=False,
+                    send_messages_in_threads=False,
+                    send_messages=False
+                ),
+                пользователь: disnake.PermissionOverwrite(
+                    view_channel=True,
+                    read_message_history=True,
+                    create_public_threads=True,
+                    send_messages_in_threads=True,
+                    send_messages=True
+                )
+            }
+            try:
+                channel = await category.create_forum_channel(
+                    name=f"❮🏢❯・{название}",
+                    overwrites=overwrites,
+                    topic=f"Организация «{название}». Владелец: {пользователь.display_name} | Тип: {company_type}"
+                )
+            except Exception as e:
+                embed = create_embed(
+                    title="❌ Ошибка при создании форума",
+                    description=f"Не удалось создать форум компании. Проверьте права бота.\n`{e}`",
+                    color=disnake.Color.red()
+                )
+                return await inter.edit_original_message(embed=embed)
 
+        # Перемещаем созданный канал в самый низ категории
         try:
-            forum_channel = await category.create_forum_channel(
-                name=f"🏢・{название}",
-                overwrites=overwrites,
-                topic=f"Организация «{название}». Владелец: {пользователь.display_name}",
-                position=len(category.channels)
-            )
-        except Exception as e:
-            embed = create_embed(
-                title="❌ Ошибка при создании форума",
-                description=f"Не удалось создать канал форума. Проверьте права бота.\n`{e}`",
-                color=disnake.Color.red()
-            )
-            return await inter.edit_original_message(embed=embed)
+            bottom_pos = max((c.position for c in category.channels), default=0) + 1
+            await channel.edit(position=bottom_pos)
+        except Exception:
+            pass
 
         # 5. Списание средств и сохранение в БД
         new_balance = owner_balance - cost
         await update_user_info(пользователь.id, "balance", str(new_balance))
-        company_id = await create_company_db(название, пользователь.id, forum_channel.id, company_type)
+        company_id = await create_company_db(название, пользователь.id, channel.id, company_type)
+
+        channel_type_label = "Текстовый канал СМИ" if company_type == "СМИ" else "Форум компании"
 
         # 6. Ответ администратору
         admin_embed = create_embed(
@@ -182,9 +220,9 @@ class CompaniesCog(commands.Cog):
                 f"**Название:** `{название}`\n"
                 f"**Тип:** `{company_type}`\n"
                 f"**Владелец:** {пользователь.mention} (`{пользователь.id}`)\n"
-                f"**Форум компании:** {forum_channel.mention}\n"
-                f"**Списано средств:** `-{format_number(cost)}` R$\n"
-                f"**Остаток у владельца:** `{format_number(new_balance)}` R$"
+                f"**Канал:** {channel.mention} ({channel_type_label})\n"
+                f"**Списано средств:** R$ `-{format_number(cost)}`\n"
+                f"**Остаток у владельца:** R$ `{format_number(new_balance)}`"
             ),
             color=disnake.Color.green()
         )
@@ -197,9 +235,9 @@ class CompaniesCog(commands.Cog):
                 f"Поздравляем! Ваша организация **«{название}»** была успешно зарегистрирована.\n\n"
                 f"• **ID компании:** `{company_id}`\n"
                 f"• **Тип:** `{company_type}`\n"
-                f"• **Стоимость:** `{format_number(cost)}` R$\n"
-                f"• **Ваш форум:** {forum_channel.mention}\n\n"
-                f"*Вы имеете полные права на создание тем и публикацию постов в своем форуме.*"
+                f"• **Стоимость:** R$ `{format_number(cost)}`\n"
+                f"• **Канал:** {channel.mention}\n\n"
+                f"*Вам предоставлены полные права на публикацию материалов в данном канале.*"
             ),
             color=disnake.Color.gold()
         )
@@ -246,7 +284,7 @@ class CompaniesCog(commands.Cog):
             title="⚠️ Подтверждение ликвидации",
             description=(
                 f"Вы действительно хотите ликвидировать компанию **«{company['name']}»** (ID: `{компания}`)?\n\n"
-                f"• Баланс компании: `{format_number(company['balance'])}` R$\n"
+                f"• Баланс компании: R$ `{format_number(company['balance'])}`\n"
                 f"• Все средства будут переведены на баланс владельца <@{company['owner_id']}>.\n"
                 f"• Канал-форум будет безвозвратно удален."
             ),

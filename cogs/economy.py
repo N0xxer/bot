@@ -3,6 +3,7 @@ import time
 import disnake
 from disnake.ext import commands
 import aiosqlite
+from typing import Optional
 
 from functions.db_helpers import get_user_info, update_user_info
 from functions.utils import create_embed, format_number, UniversalModal
@@ -28,12 +29,14 @@ def parse_roles(raw_roles) -> list:
 
 
 
+
 class EconomyCog(commands.Cog):
     """Модуль экономической системы бота."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.starting_balance = 25000
+        self.REGISTRATION_FORUM_ID = 1538222982328094802
 
 
 
@@ -579,6 +582,363 @@ class EconomyCog(commands.Cog):
             await member.send(embed=user_embed)
         except disnake.Forbidden:
             pass
+
+
+    @commands.slash_command(
+        name="send_reg_panel",
+        description="Отправить панель регистрации персонажа (Только для Администрации)"
+    )
+    @commands.has_permissions(administrator=True)
+    async def send_reg_panel(self, inter: disnake.ApplicationCommandInteraction):
+        """Отправляет сообщение с кнопкой регистрации (Скриншот 3)."""
+        desc = (
+            "**Регистрация персонажа**\n\n"
+            "Здесь вы можете зарегистрировать своего РП-персонажа для дальнейшей игры на "
+            "сервере и получения доступа ко всем основным механикам и полноценного погружения в игру.\n\n"
+            "**Форма регистрации персонажа:**\n"
+            "1. ФИО\n"
+            "2. Дата рождения (только старше 18 лет)\n"
+            "3. Пол\n"
+            "4. Биография\n"
+            "5. Фотография (разрешены только люди)"
+        )
+
+        embed = create_embed(
+            title="",
+            description=desc,
+            color=disnake.Color(0x76b3e8)
+        )
+
+        view = disnake.ui.View(timeout=None)
+        view.add_item(
+            disnake.ui.Button(
+                label="Зарегистрироваться",
+                emoji="📝",
+                style=disnake.ButtonStyle.secondary,
+                custom_id="btn:open_character_reg"
+            )
+        )
+
+        await inter.channel.send(embed=embed, view=view)
+        await inter.response.send_message("✅ Панель регистрации успешно опубликована!", ephemeral=True)
+
+    @commands.Cog.listener("on_button_click")
+    async def handle_registration_button(self, inter: disnake.MessageInteraction):
+        """Открывает модальное окно при нажатии кнопки."""
+        if inter.component.custom_id != "btn:open_character_reg":
+            return
+
+        fio = await get_user_info(inter.author.id, "FIO")
+        if fio:
+            embed = create_embed(
+                title="⚠️ Ошибка регистрации",
+                description=f"Вы уже зарегистрированы в государственной базе как **{fio}**!",
+                color=disnake.Color.orange()
+            )
+            return await inter.response.send_message(embed=embed, ephemeral=True)
+
+        # Компоненты нового формата модальных окон
+        components = [
+            disnake.ui.Label(
+                text="ФИО",
+                component=disnake.ui.TextInput(
+                    custom_id="reg_fio",
+                    placeholder="Богатинский Валентин Леонидович",
+                    style=disnake.TextInputStyle.short,
+                    max_length=100,
+                    required=True
+                )
+            ),
+            disnake.ui.Label(
+                text="Дата рождения",
+                description="Регистрировать можно лишь персонажей старше 18 лет",
+                component=disnake.ui.TextInput(
+                    custom_id="reg_birth",
+                    placeholder="03.10.1981",
+                    style=disnake.TextInputStyle.short,
+                    max_length=20,
+                    required=True
+                )
+            ),
+            disnake.ui.Label(
+                text="Пол",
+                component=disnake.ui.RadioGroup(
+                    custom_id="reg_gender",
+                    options=["Мужской", "Женский"],
+                    required=True
+                )
+            ),
+            disnake.ui.Label(
+                text="Биография",
+                description="Можно прикрепить ссылку на документ с биографией",
+                component=disnake.ui.TextInput(
+                    custom_id="reg_bio",
+                    placeholder="Напишите биографию вашего персонажа",
+                    style=disnake.TextInputStyle.paragraph,
+                    max_length=1024,
+                    required=True
+                )
+            ),
+            disnake.ui.Label(
+                text="Фотография персонажа",
+                description="Персонажами могут быть только люди",
+                component=disnake.ui.FileUpload(
+                    custom_id="reg_photo",
+                    required=True
+                )
+            )
+        ]
+
+        await inter.response.send_modal(
+            title="Регистрация персонажа",
+            custom_id="modal:character_registration",
+            components=components
+        )
+
+    @commands.Cog.listener("on_modal_submit")
+    async def handle_registration_modal(self, inter: disnake.ModalInteraction):
+        """Обрабатывает отправку модального окна регистрации."""
+        if inter.custom_id != "modal:character_registration":
+            return
+
+        await inter.response.defer(ephemeral=True)
+
+        fio = inter.text_values.get("reg_fio", "").strip()
+        birth = inter.text_values.get("reg_birth", "").strip()
+        gender = inter.values.get("reg_gender", "Не указан")
+        bio = inter.text_values.get("reg_bio", "").strip()
+
+        # 1. Извлечение файла из взаимодействия
+        photo_attachment: Optional[disnake.Attachment] = None
+
+        if hasattr(inter.data, "resolved") and inter.data.resolved and inter.data.resolved.attachments:
+            photo_attachment = next(iter(inter.data.resolved.attachments.values()), None)
+        elif hasattr(inter, "resolved") and inter.resolved and inter.resolved.attachments:
+            photo_attachment = next(iter(inter.resolved.attachments.values()), None)
+        elif hasattr(inter, "attachments") and inter.attachments:
+            photo_attachment = inter.attachments[0]
+
+        upload_file: Optional[disnake.File] = None
+        if photo_attachment:
+            upload_file = await photo_attachment.to_file()
+
+        forum = inter.guild.get_channel(self.REGISTRATION_FORUM_ID)
+        if not isinstance(forum, disnake.ForumChannel):
+            embed = create_embed(
+                title="❌ Ошибка",
+                description="Форум-канал для рассмотрения заявок не найден. Сообщите администрации.",
+                color=disnake.Color.red()
+            )
+            return await inter.edit_original_message(embed=embed)
+
+        reg_role_id = getattr(self, "REGISTRATION_ROLE_ID", None)
+        role_mention = f" • <@&{reg_role_id}>" if reg_role_id else ""
+        header_text = f"👤 {inter.author.mention}{role_mention}"
+
+        # 1. Текст внутри серого контейнера
+        container_children = [
+            disnake.ui.TextDisplay(
+                content=(
+                    f"**ФИО**\n{fio}\n\n"
+                    f"**Дата рождения**\n{birth}\n\n"
+                    f"**Пол**\n{gender}\n\n"
+                    f"**Биография**\n{bio}\n\n"
+                    f"**Фотография персонажа**"
+                )
+            )
+        ]
+
+        if upload_file:
+            gallery_item = disnake.MediaGalleryItem(media=f"attachment://{upload_file.filename}")
+            container_children.append(disnake.ui.MediaGallery(gallery_item))
+
+        # 2. Общая структура компонентов сообщения
+        components_v2 = [
+            # Текст над контейнером (выглядит как обычный текст сообщения)
+            disnake.ui.TextDisplay(content=header_text),
+
+            # Сам серый блок карточки
+            disnake.ui.Container(
+                *container_children
+            ),
+
+            # Ряд кнопок под контейнером
+            disnake.ui.ActionRow(
+                disnake.ui.Button(
+                    label="Accept",
+                    style=disnake.ButtonStyle.success,
+                    custom_id=f"reg_action:accept:{inter.author.id}"
+                ),
+                disnake.ui.Button(
+                    label="Deny",
+                    style=disnake.ButtonStyle.danger,
+                    custom_id=f"reg_action:deny:{inter.author.id}"
+                )
+            )
+        ]
+
+        # 3. Отправка без параметра content
+        thread_kwargs = {
+            "name": f"{fio}",
+            "components": components_v2
+        }
+        if upload_file:
+            thread_kwargs["file"] = upload_file
+
+        await forum.create_thread(**thread_kwargs)
+
+        success_embed = create_embed(
+            title="📨 Заявка отправлена",
+            description="Ваша анкета персонажа успешно передана на рассмотрение администрации.",
+            color=disnake.Color.green()
+        )
+        await inter.edit_original_message(embed=success_embed)
+
+
+    @commands.Cog.listener("on_button_click")
+    async def handle_registration_verdict_buttons(self, inter: disnake.MessageInteraction):
+        custom_id = inter.component.custom_id
+        if not custom_id.startswith("reg_action:"):
+            return
+
+        # Проверка прав администратора
+        if not inter.author.guild_permissions.administrator:
+            embed = create_embed(
+                title="⛔ Доступ запрещен",
+                description="Рассматривать заявки может только администрация.",
+                color=disnake.Color.red()
+            )
+            return await inter.response.send_message(embed=embed, ephemeral=True)
+
+        parts = custom_id.split(":")
+        action = parts[1]
+        target_user_id = int(parts[2])
+        target_member = inter.guild.get_member(target_user_id)
+
+        # ==========================================
+        #                 ACCEPT
+        # ==========================================
+        if action == "accept":
+            await inter.response.defer()
+
+            # Получаем ФИО из названия ветки (или из эмбеда)
+            fio = inter.channel.name if isinstance(inter.channel, disnake.Thread) else "Гражданин"
+            
+            # Сохраняем фото (если было прикреплено к сообщению)
+            photo_url = inter.message.embeds[0].image.url if inter.message.embeds and inter.message.embeds[0].image else None
+
+            # Запись в БД со стартовым капиталом
+            async with aiosqlite.connect("dbs/main.db") as db:
+                await db.execute(
+                    """
+                    INSERT INTO users (user_id, balance, FIO, functions, photo, last_collection, last_work)
+                    VALUES (?, ?, ?, NULL, ?, NULL, NULL)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        balance = ?,
+                        FIO = ?,
+                        functions = NULL,
+                        photo = ?,
+                        last_collection = NULL,
+                        last_work = NULL
+                    """,
+                    (target_user_id, self.starting_balance, fio, photo_url, self.starting_balance, fio, photo_url)
+                )
+                await db.commit()
+
+            # Заменяем кнопки на одну неактивную
+            result_view = disnake.ui.View()
+            result_view.add_item(
+                disnake.ui.Button(
+                    label=f"Accepted by {inter.author.display_name}",
+                    style=disnake.ButtonStyle.success,
+                    disabled=True
+                )
+            )
+            await inter.edit_original_message(view=result_view)
+
+            # Уведомление игроку в ЛС
+            if target_member:
+                user_embed = create_embed(
+                    title="🎉 Регистрация завершена",
+                    description=(
+                        f"Ваша анкета была одобрена администрацией!\n\n"
+                        f"👤 **ФИО:** `{fio}`\n"
+                        f"💳 **Стартовый капитал:** `{format_number(self.starting_balance)}` R$\n"
+                        f"Регистратор: {inter.author.mention}"
+                    ),
+                    color=disnake.Color.green()
+                )
+                try:
+                    await target_member.send(embed=user_embed)
+                except disnake.Forbidden:
+                    pass
+
+        # ==========================================
+        #                  DENY
+        # ==========================================
+        elif action == "deny":
+            # Открываем модалку для ввода необязательной причины отказа
+            components = [
+                disnake.ui.Label(
+                    text="Причина отказа",
+                    description="Укажите причину отказа (необязательно)",
+                    component=disnake.ui.TextInput(
+                        custom_id="deny_reason",
+                        placeholder="Например: Некорректная биография / дата рождения",
+                        style=disnake.TextInputStyle.paragraph,
+                        max_length=500,
+                        required=False
+                    )
+                )
+            ]
+            await inter.response.send_modal(
+                title="Отказ в регистрации",
+                custom_id=f"modal:reg_deny:{target_user_id}:{inter.message.id}",
+                components=components
+            )
+
+    @commands.Cog.listener("on_modal_submit")
+    async def handle_registration_deny_modal(self, inter: disnake.ModalInteraction):
+        if not inter.custom_id.startswith("modal:reg_deny:"):
+            return
+
+        await inter.response.defer()
+
+        parts = inter.custom_id.split(":")
+        target_user_id = int(parts[2])
+        message_id = int(parts[3])
+        reason = inter.text_values.get("deny_reason", "").strip()
+
+        # Обновляем кнопки на исходном сообщении с заявкой
+        try:
+            msg = await inter.channel.fetch_message(message_id)
+            result_view = disnake.ui.View()
+            result_view.add_item(
+                disnake.ui.Button(
+                    label=f"Denied by {inter.author.display_name}",
+                    style=disnake.ButtonStyle.danger,
+                    disabled=True
+                )
+            )
+            await msg.edit(view=result_view)
+        except Exception:
+            pass
+
+        # Отправка уведомления пользователю в ЛС
+        target_member = inter.guild.get_member(target_user_id)
+        if target_member:
+            reason_text = f"\n\n**Причина:** {reason}" if reason else ""
+            deny_embed = create_embed(
+                title="❌ Заявка на регистрацию отклонена",
+                description=f"Ваша анкета персонажа была отклонена администратором {inter.author.mention}.{reason_text}",
+                color=disnake.Color.red()
+            )
+            try:
+                await target_member.send(embed=deny_embed)
+            except disnake.Forbidden:
+                pass
+
+        await inter.delete_original_message()
 
 
 
