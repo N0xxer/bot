@@ -5,8 +5,8 @@ import aiosqlite
 import disnake
 from disnake.ext import commands
 
-from functions.db_helpers import create_law_proposal, get_user_info, update_user_info, get_law_proposal, update_law_proposal_status
-from functions.utils import create_embed, UniversalModal
+from functions.db_helpers import create_law_proposal, get_user_info, update_user_info, get_law_proposal, update_law_proposal_status, DB_PATH
+from functions.utils import create_embed, UniversalModal, format_number
 
 # === КОНФИГУРАЦИЯ И СПИСКИ РОЛЕЙ ===
 # ID канала для логирования выдачи/снятия ролей (укажи свой)
@@ -69,6 +69,7 @@ class PoliticsCog(commands.Cog):
         self.bot = bot
         self.PROPOSALS_FORUM_ID = 1520142456782327908  # Форум входящих заявок
         self.VOTING_FORUM_ID = 1520143914546495699
+        self.LAW_REVIEW_ROLE_ID = 1540367846658412596
 
     # ==========================================
     #           УПРАВЛЕНИЕ РОЛЯМИ (/function)
@@ -292,9 +293,9 @@ class PoliticsCog(commands.Cog):
             end_time = str(int(time.time()) + 86400)
             initial_votes = json.dumps({})
 
-            os.makedirs("dbs", exist_ok=True)
+            os.makedirs("data", exist_ok=True)
 
-            async with aiosqlite.connect("dbs/main.db") as db:
+            async with aiosqlite.connect(DB_PATH) as db:
                 cursor = await db.execute(
                     """
                     INSERT INTO votings (question, options, votes, start_time, end_time)
@@ -305,7 +306,7 @@ class PoliticsCog(commands.Cog):
                 poll_id = cursor.lastrowid
                 await db.commit()
 
-            json_path = "dbs/votings_temp.json"
+            json_path = "data/votings_temp.json"
             temp_data = {}
             if os.path.exists(json_path):
                 with open(json_path, "r", encoding="utf-8") as f:
@@ -369,7 +370,7 @@ class PoliticsCog(commands.Cog):
         raw_roles = await get_user_info(inter.author.id, "functions")
         user_roles = parse_user_roles(raw_roles)
 
-        async with aiosqlite.connect("dbs/main.db") as db:
+        async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT question, votes FROM votings WHERE id = ?", (poll_id,)) as cursor:
                 row = await cursor.fetchone()
                 if not row:
@@ -463,7 +464,7 @@ class PoliticsCog(commands.Cog):
             "weight": vote_weight
         }
 
-        async with aiosqlite.connect("dbs/main.db") as db:
+        async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "UPDATE votings SET votes = ? WHERE id = ?",
                 (json.dumps(votes_dict), poll_id)
@@ -535,7 +536,7 @@ class PoliticsCog(commands.Cog):
         ]
 
         components = [
-            disnake.ui.Container(*container_body, accent_colour=disnake.Colour(0xdce7eb)),
+            disnake.ui.Container(*container_body),
             disnake.ui.ActionRow(
                 disnake.ui.Button(
                     label="Подать законопроект",
@@ -549,48 +550,61 @@ class PoliticsCog(commands.Cog):
         await inter.channel.send(components=components)
         await inter.edit_original_message(content="✅ Панель подачи успешно отправлена.")
 
-    # --- Обработчик клика по кнопке «Подать законопроект» ---
+    # =========================================================
+    #            ОТКРЫТИЕ МОДАЛКИ ЗАКОНОПРОЕКТА
+    # =========================================================
+
     @commands.Cog.listener("on_button_click")
     async def handle_open_proposal_modal(self, inter: disnake.MessageInteraction):
         if inter.component.custom_id != "btn:open_law_proposal_modal":
             return
 
         modal_components = [
-            disnake.ui.TextInput(
-                label="Название закона",
-                placeholder="О уголовных преступлениях",
-                custom_id="law_name",
-                style=disnake.TextInputStyle.short,
-                min_length=3,
-                max_length=150,
-                required=True
+            disnake.ui.Label(
+                text="Название закона",
+                component=disnake.ui.TextInput(
+                    custom_id="law_name",
+                    placeholder="О уголовных преступлениях",
+                    style=disnake.TextInputStyle.short,
+                    min_length=3,
+                    max_length=150,
+                    required=True
+                )
             ),
-            disnake.ui.StringSelect(
-                custom_id="law_type",
-                placeholder="Выберете тип закона",
-                options=[
-                    disnake.SelectOption(label="Федеральный Закон (ФЗ)", value="ФЗ", emoji="📘"),
-                    disnake.SelectOption(label="Федеральный Конституционный Закон (ФКЗ)", value="ФКЗ", emoji="📕")
-                ],
-                min_values=1,
-                max_values=1
+            disnake.ui.Label(
+                text="Тип закона",
+                component=disnake.ui.StringSelect(
+                    custom_id="law_type",
+                    placeholder="Выберите тип закона",
+                    options=[
+                        disnake.SelectOption(label="Федеральный Закон (ФЗ)", value="ФЗ", emoji="📘"),
+                        disnake.SelectOption(label="Федеральный Конституционный Закон (ФКЗ)", value="ФКЗ", emoji="📕")
+                    ],
+                    min_values=1,
+                    max_values=1
+                )
             ),
-            disnake.ui.TextInput(
-                label="Текст закона",
-                placeholder="Желательно выложить ссылку на Google Документ с текстом вашего закона",
-                custom_id="law_text",
-                style=disnake.TextInputStyle.paragraph,
-                min_length=10,
-                max_length=4000,
-                required=True
+            disnake.ui.Label(
+                text="Текст закона",
+                description="Желательно выложить ссылку на Google Документ с текстом вашего закона",
+                component=disnake.ui.TextInput(
+                    custom_id="law_text",
+                    placeholder="Текст закона",
+                    style=disnake.TextInputStyle.paragraph,
+                    min_length=10,
+                    max_length=4000,
+                    required=True
+                )
             ),
-            disnake.ui.TextInput(
-                label="Пояснения к закону",
-                placeholder="В чём смысл данного закона?",
-                custom_id="law_comment",
-                style=disnake.TextInputStyle.paragraph,
-                max_length=2000,
-                required=False
+            disnake.ui.Label(
+                text="Пояснения к закону",
+                component=disnake.ui.TextInput(
+                    custom_id="law_comment",
+                    placeholder="В чём смысл данного закона?",
+                    style=disnake.TextInputStyle.paragraph,
+                    max_length=2000,
+                    required=False
+                )
             )
         ]
 
@@ -600,7 +614,10 @@ class PoliticsCog(commands.Cog):
             components=modal_components
         )
 
-    # --- Обработчик отправки модалки с законопроектом ---
+    # =========================================================
+    #            ОБРАБОТКА ПОДАЧИ ЗАКОНОПРОЕКТА
+    # =========================================================
+
     @commands.Cog.listener("on_modal_submit")
     async def handle_law_proposal_submit(self, inter: disnake.ModalInteraction):
         if inter.custom_id != "modal:submit_law_proposal":
@@ -609,11 +626,12 @@ class PoliticsCog(commands.Cog):
         await inter.response.defer(ephemeral=True)
 
         law_name = inter.text_values.get("law_name", "").strip()
-        law_type_val = inter.values.get("law_type", "ФЗ")
+        raw_type = inter.values.get("law_type")
+        law_type_val = raw_type[0] if isinstance(raw_type, list) and raw_type else "ФЗ"
         law_text = inter.text_values.get("law_text", "").strip()
         law_comment = inter.text_values.get("law_comment", "").strip()
 
-        # Сохранение в БД
+        # 1. Запись в БД
         proposal_id = await create_law_proposal(
             author_id=inter.author.id,
             law_name=law_name,
@@ -631,24 +649,25 @@ class PoliticsCog(commands.Cog):
             )
             return await inter.edit_original_message(embed=embed)
 
+        prop_role_id = self.LAW_REVIEW_ROLE_ID
+        role_mention = f" • <@&{prop_role_id}>" if prop_role_id else ""
+        header_text = f"👤 {inter.author.mention}{role_mention}"
+
         type_badge = "📕 Федеральный Конституционный Закон" if law_type_val == "ФКЗ" else "📘 Федеральный Закон"
 
         content_parts = [
             f"**Название закона**\n{law_name}\n\n",
             f"**Тип закона**\n{type_badge}\n\n"
         ]
-
         if law_comment:
             content_parts.append(f"**Пояснения к закону**\n{law_comment}\n\n")
-
         content_parts.append(f"**Текст закона**\n{law_text}")
 
-        # Components V2 карточка в форум (Скрин 3)
+        # 2. Карточка в форум (Контейнер без цвета)
         components_v2 = [
-            disnake.ui.TextDisplay(content=f"👤 {inter.author.mention}"),
+            disnake.ui.TextDisplay(content=header_text),
             disnake.ui.Container(
-                disnake.ui.TextDisplay(content="".join(content_parts)),
-                accent_colour=disnake.Colour(0xdce7eb)
+                disnake.ui.TextDisplay(content="".join(content_parts))
             ),
             disnake.ui.ActionRow(
                 disnake.ui.Button(
@@ -676,166 +695,255 @@ class PoliticsCog(commands.Cog):
         )
         await inter.edit_original_message(embed=success_embed)
 
-    # --- Обработчик кнопок Accept / Deny ---
+    # =========================================================
+    #            ОБРАБОТКА ВЕРДИКТОВ (ACCEPT / DENY)
+    # =========================================================
+
     @commands.Cog.listener("on_button_click")
-    async def handle_proposal_actions(self, inter: disnake.MessageInteraction):
+    async def handle_law_verdict_buttons(self, inter: disnake.MessageInteraction):
         custom_id = inter.component.custom_id
         if not custom_id.startswith("law_action:"):
             return
 
-        _, action, proposal_id_str = custom_id.split(":")
-        proposal_id = int(proposal_id_str)
+        # Проверка прав администратора
+        if not inter.author.guild_permissions.administrator:
+            embed = create_embed(
+                title="⛔ Доступ запрещен",
+                description="Рассматривать законопроекты может только администрация.",
+                color=disnake.Color.red()
+            )
+            return await inter.response.send_message(embed=embed, ephemeral=True)
+
+        parts = custom_id.split(":")
+        action = parts[1]
+        proposal_id = int(parts[2])
 
         proposal = await get_law_proposal(proposal_id)
         if not proposal:
-            return await inter.response.send_message("❌ Законопроект не найден в базе данных.", ephemeral=True)
+            embed = create_embed(
+                title="❌ Ошибка",
+                description="Законопроект не найден в базе данных.",
+                color=disnake.Color.red()
+            )
+            return await inter.response.send_message(embed=embed, ephemeral=True)
 
         if proposal["status"] != "pending":
-            return await inter.response.send_message(f"⚠️ Этот законопроект уже был рассмотрен (Статус: `{proposal['status']}`).", ephemeral=True)
+            embed = create_embed(
+                title="⚠️ Внимание",
+                description=f"Этот законопроект уже был рассмотрен (Статус: `{proposal['status']}`).",
+                color=disnake.Color.orange()
+            )
+            return await inter.response.send_message(embed=embed, ephemeral=True)
 
-        # 1. ОТКЛОНЕНИЕ (DENY)
-        if action == "deny":
-            modal_components = [
-                disnake.ui.TextInput(
-                    label="Причина отклонения",
-                    placeholder="Укажите причину отказа...",
-                    custom_id="deny_reason",
-                    style=disnake.TextInputStyle.paragraph,
-                    max_length=1000,
-                    required=True
+        # ==========================================
+        #                   ACCEPT
+        # ==========================================
+        if action == "accept":
+            await inter.response.defer()
+
+            # 1. Создаем запись голосования в БД
+            question_text = f"Законопроект: «{proposal['law_name']}» ({proposal['law_type']})\n\n{proposal['law_text']}"
+            start_time = str(int(time.time()))
+            end_time = str(int(time.time()) + 86400)
+            initial_votes = json.dumps({})
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute(
+                    """
+                    INSERT INTO votings (question, options, votes, start_time, end_time)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (question_text, json.dumps(["За", "Против", "Воздержаться"]), initial_votes, start_time, end_time)
+                )
+                poll_id = cursor.lastrowid
+                await db.commit()
+
+            # 2. Обновляем статус в БД
+            await update_law_proposal_status(proposal_id, "accepted", inter.author.id, voting_poll_id=poll_id)
+
+            # 3. Публикуем голосование в форум голосований
+            target_channel = inter.guild.get_channel(self.VOTING_FORUM_ID)
+            vote_desc = (
+                f"**Суть вопроса:**\n{question_text}\n\n"
+                f"📊 **Текущие результаты:**\n"
+                f"🟢 За: `0` (0.0%)\n"
+                f"🔴 Против: `0` (0.0%)\n"
+                f"⚪ Воздержались: `0` (0.0%)\n\n"
+                f"Всего проголосовало: `0` чел."
+            )
+            vote_embed = create_embed(
+                title="🗳️ Политическое голосование",
+                description=vote_desc,
+                color=disnake.Color.blurple(),
+                footer_text=f"Инициатор: {proposal['law_name']} | ID: {poll_id}"
+            )
+            vote_view = disnake.ui.View(timeout=None)
+            vote_view.add_item(disnake.ui.Button(label="За", style=disnake.ButtonStyle.success, custom_id=f"vote:for:{poll_id}"))
+            vote_view.add_item(disnake.ui.Button(label="Против", style=disnake.ButtonStyle.danger, custom_id=f"vote:against:{poll_id}"))
+            vote_view.add_item(disnake.ui.Button(label="Воздержаться", style=disnake.ButtonStyle.secondary, custom_id=f"vote:abstain:{poll_id}"))
+            vote_view.add_item(disnake.ui.Button(label="Завершить", style=disnake.ButtonStyle.primary, custom_id=f"vote:end:{poll_id}"))
+
+            if isinstance(target_channel, disnake.ForumChannel):
+                # Ищем тег «Голосование» или берем первый доступный тег форума
+                tag = disnake.utils.get(target_channel.available_tags, name="Активные")
+                tags = [tag] if tag else (target_channel.available_tags[:1] if target_channel.available_tags else [])
+
+                await target_channel.create_thread(
+                    name=f"Голосование: {proposal['law_name'][:80]}",
+                    embed=vote_embed,
+                    view=vote_view,
+                    applied_tags=tags
+                )
+            elif target_channel:
+                await target_channel.send(embed=vote_embed, view=vote_view)
+
+            # 4. Уведомление автору в ЛС
+            author = inter.guild.get_member(proposal["author_id"])
+            if author:
+                dm_embed = create_embed(
+                    title="📜 Законопроект принят к рассмотрению",
+                    description=(
+                        f"Ваш законопроект **«{proposal['law_name']}»** был успешно одобрен к голосованию в Сейме!\n"
+                        f"Одобрил: {inter.author.mention}"
+                    ),
+                    color=disnake.Color.green()
+                )
+                try:
+                    await author.send(embed=dm_embed)
+                except disnake.Forbidden:
+                    pass
+
+            # 5. Пересобираем карточку с сохранением контейнера
+            prop_role_id = self.LAW_REVIEW_ROLE_ID
+            role_mention = f" • <@&{prop_role_id}>" if prop_role_id else ""
+            header_text = f"👤 <@{proposal['author_id']}>{role_mention}"
+
+            type_badge = "📕 Федеральный Конституционный Закон" if proposal["law_type"] == "ФКЗ" else "📘 Федеральный Закон"
+            content_parts = [
+                f"**Название закона**\n{proposal['law_name']}\n\n",
+                f"**Тип закона**\n{type_badge}\n\n"
+            ]
+            if proposal.get("law_comment"):
+                content_parts.append(f"**Пояснения к закону**\n{proposal['law_comment']}\n\n")
+            content_parts.append(f"**Текст закона**\n{proposal['law_text']}")
+
+            updated_components = [
+                disnake.ui.TextDisplay(content=header_text),
+                disnake.ui.Container(
+                    disnake.ui.TextDisplay(content="".join(content_parts))
+                ),
+                disnake.ui.ActionRow(
+                    disnake.ui.Button(
+                        label=f"Accepted by {inter.author.display_name}",
+                        style=disnake.ButtonStyle.success,
+                        disabled=True
+                    )
                 )
             ]
-            return await inter.response.send_modal(
-                title=f"Отклонение законопроекта #{proposal_id}",
-                custom_id=f"modal:deny_law_reason:{proposal_id}",
-                components=modal_components
+
+            await inter.edit_original_message(components=updated_components)
+
+        # ==========================================
+        #                    DENY
+        # ==========================================
+        elif action == "deny":
+            components = [
+                disnake.ui.Label(
+                    text="Причина отказа",
+                    description="Укажите причину отказа (необязательно)",
+                    component=disnake.ui.TextInput(
+                        custom_id="deny_reason",
+                        placeholder="Например: Противоречит Конституции / некорректное оформление",
+                        style=disnake.TextInputStyle.paragraph,
+                        max_length=500,
+                        required=False
+                    )
+                )
+            ]
+            await inter.response.send_modal(
+                title="Отказ законопроекта",
+                custom_id=f"modal:law_deny:{proposal_id}:{inter.message.id}",
+                components=components
             )
 
-        # 2. ПРИНЯТИЕ (ACCEPT)
-        await inter.response.defer()
+    # =========================================================
+    #         МОДАЛКА ПРИЧИНЫ ОТКАЗА ЗАКОНОПРОЕКТА
+    # =========================================================
 
-        # Создание записи голосования в БД
-        question_text = f"Законопроект: «{proposal['law_name']}» ({proposal['law_type']})\n\n{proposal['law_text']}"
-        start_time = str(int(time.time()))
-        end_time = str(int(time.time()) + 86400)
-        initial_votes = json.dumps({})
-
-        async with aiosqlite.connect("dbs/main.db") as db:
-            cursor = await db.execute(
-                """
-                INSERT INTO votings (question, options, votes, start_time, end_time)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (question_text, json.dumps(["За", "Против", "Воздержаться"]), initial_votes, start_time, end_time)
-            )
-            poll_id = cursor.lastrowid
-            await db.commit()
-
-        # Обновляем статус в БД
-        await update_law_proposal_status(proposal_id, "accepted", inter.author.id, voting_poll_id=poll_id)
-
-        # Публикуем голосование в форум голосований
-        target_channel = inter.guild.get_channel(self.VOTING_FORUM_ID)
-        vote_desc = (
-            f"**Суть вопроса:**\n{question_text}\n\n"
-            f"📊 **Текущие результаты:**\n"
-            f"🟢 За: `0` (0.0%)\n"
-            f"🔴 Против: `0` (0.0%)\n"
-            f"⚪ Воздержались: `0` (0.0%)\n\n"
-            f"Всего проголосовало: `0` чел."
-        )
-        vote_embed = create_embed(
-            title="🗳️ Политическое голосование",
-            description=vote_desc,
-            color=disnake.Color.blurple(),
-            footer_text=f"Инициатор: {proposal['law_name']} | ID: {poll_id}"
-        )
-        vote_view = disnake.ui.View(timeout=None)
-        vote_view.add_item(disnake.ui.Button(label="За", style=disnake.ButtonStyle.success, custom_id=f"vote:for:{poll_id}"))
-        vote_view.add_item(disnake.ui.Button(label="Против", style=disnake.ButtonStyle.danger, custom_id=f"vote:against:{poll_id}"))
-        vote_view.add_item(disnake.ui.Button(label="Воздержаться", style=disnake.ButtonStyle.secondary, custom_id=f"vote:abstain:{poll_id}"))
-        vote_view.add_item(disnake.ui.Button(label="Завершить", style=disnake.ButtonStyle.primary, custom_id=f"vote:end:{poll_id}"))
-
-        if isinstance(target_channel, disnake.ForumChannel):
-            await target_channel.create_thread(name=f"Голосование: {proposal['law_name'][:80]}", embed=vote_embed, view=vote_view)
-        elif target_channel:
-            await target_channel.send(embed=vote_embed, view=vote_view)
-
-        # Уведомление автору в ЛС
-        author = inter.guild.get_member(proposal["author_id"])
-        if author:
-            dm_embed = create_embed(
-                title="📜 Законопроект принят к рассмотрению",
-                description=(
-                    f"Ваш законопроект **«{proposal['law_name']}»** был успешно одобрен к голосованию в Сейме!\n"
-                    f"Одобрил: {inter.author.mention}"
-                ),
-                color=disnake.Color.green()
-            )
-            try:
-                await author.send(embed=dm_embed)
-            except disnake.Forbidden:
-                pass
-
-        # Заменяем кнопки на одну неактивную
-        updated_components = list(inter.message.components)
-        # Убираем ряд кнопок и ставим финальную
-        new_row = disnake.ui.ActionRow(
-            disnake.ui.Button(
-                label=f"Accepted by {inter.author.display_name}",
-                style=disnake.ButtonStyle.success,
-                disabled=True
-            )
-        )
-        # Заменяем последний компонент (ряд кнопок)
-        updated_components[-1] = new_row
-        await inter.edit_original_message(components=updated_components)
-
-    # --- Обработка модалки причины отказа ---
     @commands.Cog.listener("on_modal_submit")
-    async def handle_deny_law_modal(self, inter: disnake.ModalInteraction):
-        if not inter.custom_id.startswith("modal:deny_law_reason:"):
+    async def handle_law_deny_modal(self, inter: disnake.ModalInteraction):
+        if not inter.custom_id.startswith("modal:law_deny:"):
             return
 
         await inter.response.defer()
-        proposal_id = int(inter.custom_id.split(":")[2])
-        reason = inter.text_values.get("deny_reason", "Причина не указана").strip()
+
+        parts = inter.custom_id.split(":")
+        proposal_id = int(parts[2])
+        message_id = int(parts[3])
+        reason = inter.text_values.get("deny_reason", "").strip()
 
         proposal = await get_law_proposal(proposal_id)
         if not proposal:
-            return
+            return await inter.delete_original_message()
 
-        # Обновляем статус в БД
-        await update_law_proposal_status(proposal_id, "denied", inter.author.id, reject_reason=reason)
+        # 1. Обновляем статус в БД
+        await update_law_proposal_status(
+            proposal_id, 
+            "denied", 
+            inter.author.id, 
+            reject_reason=reason if reason else "Причина не указана"
+        )
 
-        # Отправляем ЛС автору
+        # 2. Уведомление автору в ЛС
         author = inter.guild.get_member(proposal["author_id"])
         if author:
-            dm_embed = create_embed(
+            reason_text = f"\n\n**Причина:** {reason}" if reason else ""
+            deny_embed = create_embed(
                 title="❌ Законопроект отклонен",
-                description=(
-                    f"Ваш законопроект **«{proposal['law_name']}»** был отклонен.\n\n"
-                    f"**Причина отказа:**\n{reason}\n\n"
-                    f"Отклонил: {inter.author.mention}"
-                ),
+                description=f"Ваш законопроект **«{proposal['law_name']}»** был отклонен администратором {inter.author.mention}.{reason_text}",
                 color=disnake.Color.red()
             )
             try:
-                await author.send(embed=dm_embed)
+                await author.send(embed=deny_embed)
             except disnake.Forbidden:
                 pass
 
-        # Заменяем кнопки на сервере на неактивную
-        updated_components = list(inter.message.components)
-        new_row = disnake.ui.ActionRow(
-            disnake.ui.Button(
-                label=f"Denied by {inter.author.display_name}",
-                style=disnake.ButtonStyle.danger,
-                disabled=True
-            )
-        )
-        updated_components[-1] = new_row
-        await inter.edit_original_message(components=updated_components)
+        # 3. Пересобираем карточку с сохранением контейнера в исходном сообщении
+        try:
+            msg = await inter.channel.fetch_message(message_id)
+
+            prop_role_id = self.LAW_REVIEW_ROLE_ID
+            role_mention = f" • <@&{prop_role_id}>" if prop_role_id else ""
+            header_text = f"👤 <@{proposal['author_id']}>{role_mention}"
+
+            type_badge = "📕 Федеральный Конституционный Закон" if proposal["law_type"] == "ФКЗ" else "📘 Федеральный Закон"
+            content_parts = [
+                f"**Название закона**\n{proposal['law_name']}\n\n",
+                f"**Тип закона**\n{type_badge}\n\n"
+            ]
+            if proposal.get("law_comment"):
+                content_parts.append(f"**Пояснения к закону**\n{proposal['law_comment']}\n\n")
+            content_parts.append(f"**Текст закона**\n{proposal['law_text']}")
+
+            updated_components = [
+                disnake.ui.TextDisplay(content=header_text),
+                disnake.ui.Container(
+                    disnake.ui.TextDisplay(content="".join(content_parts))
+                ),
+                disnake.ui.ActionRow(
+                    disnake.ui.Button(
+                        label=f"Denied by {inter.author.display_name}",
+                        style=disnake.ButtonStyle.danger,
+                        disabled=True
+                    )
+                )
+            ]
+
+            await msg.edit(components=updated_components)
+        except Exception:
+            pass
+
+        await inter.delete_original_message()
 
 
 

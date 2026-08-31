@@ -5,7 +5,7 @@ from disnake.ext import commands
 import aiosqlite
 from typing import Optional
 
-from functions.db_helpers import get_user_info, update_user_info
+from functions.db_helpers import get_user_info, update_user_info, DB_PATH
 from functions.utils import create_embed, format_number, UniversalModal
 
 # Загрузка конфигурации ролей
@@ -498,7 +498,7 @@ class EconomyCog(commands.Cog):
         clean_fio = fio.strip()
 
         # Запись в БД со стартовым балансом и пустыми должностями
-        async with aiosqlite.connect("dbs/main.db") as db:
+        async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
                 INSERT INTO users (user_id, balance, FIO, functions, photo, last_collection, last_work)
@@ -555,7 +555,7 @@ class EconomyCog(commands.Cog):
         причина: str = commands.Param(default="Сброс персонажа", description="Причина аннулирования")
     ):
         """Полностью удаляет запись пользователя из базы данных."""
-        async with aiosqlite.connect("dbs/main.db") as db:
+        async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "DELETE FROM users WHERE user_id = ?",
                 (пользователь.id,)
@@ -824,7 +824,7 @@ class EconomyCog(commands.Cog):
             photo_url = inter.message.embeds[0].image.url if inter.message.embeds and inter.message.embeds[0].image else None
 
             # Запись в БД со стартовым капиталом
-            async with aiosqlite.connect("dbs/main.db") as db:
+            async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     """
                     INSERT INTO users (user_id, balance, FIO, functions, photo, last_collection, last_work)

@@ -2,8 +2,13 @@ from typing import Any, Optional, Dict
 import aiosqlite
 import os
 import json
+from pathlib import Path
 
-DB_PATH = "dbs/main.db"
+# Приоритет переменной окружения хостинга (/app/data/main.db), локально — data/main.db
+DB_PATH = os.getenv("DATABASE_PATH", str(Path("data/main.db").resolve()))
+
+# Гарантируем создание папки для базы данных
+Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_USER_FIELDS = {
     "user_id",
@@ -151,7 +156,7 @@ async def get_all_registered_users():
 # ==========================================
 
 
-async def create_company_db(name: str, owner_id: int, forum_id: int, company_type: str) -> int:
+async def create_company_db(name: str, owner_id: int, forum_id: Optional[int], company_type: str) -> int:
     """Создает запись о компании и возвращает ее ID."""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
@@ -223,7 +228,6 @@ async def get_region_by_name(region_name: str) -> Optional[Dict[str, Any]]:
             return None
 
 
-
 async def update_region_balance(region_name: str, new_balance: int):
     """Обновляет баланс региона."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -274,7 +278,7 @@ async def update_region_owner(region_name: str, owner_id: Optional[int]):
 
 async def create_law_proposal(author_id: int, law_name: str, law_type: str, law_text: str, law_comment: Optional[str] = None) -> int:
     """Создает запись о новом законопроекте в БД и возвращает его ID."""
-    async with aiosqlite.connect("dbs/main.db") as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             """
             INSERT INTO law_proposals (author_id, law_name, law_type, law_text, law_comment)
@@ -285,17 +289,19 @@ async def create_law_proposal(author_id: int, law_name: str, law_type: str, law_
         await db.commit()
         return cursor.lastrowid
 
+
 async def get_law_proposal(proposal_id: int) -> Optional[dict]:
     """Получает данные о законопроекте по его ID."""
-    async with aiosqlite.connect("dbs/main.db") as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM law_proposals WHERE id = ?", (proposal_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
+
 async def update_law_proposal_status(proposal_id: int, status: str, reviewed_by: int, reject_reason: Optional[str] = None, voting_poll_id: Optional[int] = None):
     """Обновляет статус законопроекта (accepted / denied)."""
-    async with aiosqlite.connect("dbs/main.db") as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
             UPDATE law_proposals
