@@ -21,15 +21,18 @@ class ModerationCog(commands.Cog):
 
     async def bot_slash_command_check(self, inter: disnake.ApplicationCommandInteraction) -> bool:
         """Глобальная проверка регистрации для всех слэш-команд."""
-        # 1. Пропускаем администраторов сервера
-        if inter.author.guild_permissions.administrator:
+        # 1. Защита от вызова в ЛС (где нет guild_permissions)
+        if not inter.guild or inter.author.guild_permissions.administrator:
             return True
 
-        # 2. Пропускаем исключенные команды
-        if inter.application_command.name in ALLOWED_WITHOUT_REG:
+        # 2. Проверяем как базовое имя, так и полное имя с подкомандами
+        cmd_name = inter.application_command.name
+        full_cmd_name = getattr(inter.application_command, "qualified_name", cmd_name)
+
+        if cmd_name in ALLOWED_WITHOUT_REG or full_cmd_name in ALLOWED_WITHOUT_REG:
             return True
 
-        # 3. Проверяем регистрацию пользователя в базе данных
+        # 3. Проверка в БД
         registered = await is_user_registered(inter.author.id)
         if not registered:
             embed = create_embed(
@@ -41,7 +44,9 @@ class ModerationCog(commands.Cog):
                 ),
                 color=disnake.Color.red()
             )
-            await inter.response.send_message(embed=embed, ephemeral=True)
+            # Отвечаем, только если интеракция еще не была подтверждена/отвечена
+            if not inter.response.is_done():
+                await inter.response.send_message(embed=embed, ephemeral=True)
             return False
 
         return True

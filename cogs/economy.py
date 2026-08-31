@@ -551,35 +551,31 @@ class EconomyCog(commands.Cog):
     async def unregister(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        member: disnake.Member = commands.Param(description="Пользователь для сброса регистрации"),
-        reason: str = commands.Param(default="Сброс персонажа", description="Причина аннулирования")
+        пользователь: disnake.Member = commands.Param(description="Пользователь для сброса регистрации"),
+        причина: str = commands.Param(default="Сброс персонажа", description="Причина аннулирования")
     ):
-        """Сбрасывает регистрацию пользователя: очищает FIO, роли, фото и баланс."""
+        """Полностью удаляет запись пользователя из базы данных."""
         async with aiosqlite.connect("dbs/main.db") as db:
             await db.execute(
-                """
-                UPDATE users 
-                SET FIO = '', balance = 0, functions = NULL, photo = NULL, last_collection = NULL, last_work = NULL
-                WHERE user_id = ?
-                """,
-                (member.id,)
+                "DELETE FROM users WHERE user_id = ?",
+                (пользователь.id,)
             )
             await db.commit()
 
         embed = create_embed(
-            title="🗑️ Персонаж аннулирован",
-            description=f"Регистрация пользователя {member.mention} была успешно сброшена.\n**Причина:** {reason}",
+            title="🗑️ Персонаж удален",
+            description=f"Запись пользователя {пользователь.mention} была полностью удалена из базы данных.\n**Причина:** {причина}",
             color=disnake.Color.red()
         )
         await inter.response.send_message(embed=embed, ephemeral=True)
 
         user_embed = create_embed(
             title="⚠️ Регистрация аннулирована",
-            description=f"Ваш РП-персонаж был сброшен администрацией.\n**Причина:** {reason}",
+            description=f"Ваш РП-персонаж был удален администрацией.\n**Причина:** {причина}",
             color=disnake.Color.red()
         )
         try:
-            await member.send(embed=user_embed)
+            await пользователь.send(embed=user_embed)
         except disnake.Forbidden:
             pass
 
