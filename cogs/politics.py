@@ -237,7 +237,7 @@ class PoliticsCog(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         пользователь: disnake.Member = commands.Param(description="Пользователь, которому устанавливается мандат"),
-        количество: int = commands.Param(description="Количество мандатных мест", ge=1)
+        количество: int = commands.Param(description="Количество мандатных мест", ge=0)
     ):
         await update_user_info(пользователь.id, "mandates", количество)
 
