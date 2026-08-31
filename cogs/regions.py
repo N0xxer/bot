@@ -96,21 +96,24 @@ class RegionsCog(commands.Cog):
 
     @region_group.sub_command(
         name="leader",
-        description="Назначить руководителя (губернатора) региона (Только для Администрации)"
+        description="Назначить или снять руководителя (губернатора) региона (Только для Администрации)"
     )
     @commands.has_permissions(administrator=True)
     async def region_leader(
         self,
         inter: disnake.ApplicationCommandInteraction,
         region_name: str = commands.Param(name="region", description="Выберите регион", autocomplete=region_autocomplete),
-        member: disnake.Member = commands.Param(description="Пользователь для назначения на пост")
+        member: Optional[disnake.Member] = commands.Param(
+            default=None,
+            description="Пользователь для назначения (оставьте пустым, чтобы снять лидера)"
+        )
     ):
         await inter.response.defer(ephemeral=True)
 
         if not inter.author.guild_permissions.administrator:
             embed = create_embed(
                 title="⛔ Доступ запрещен",
-                description="Назначать руководителей регионов может только администрация.",
+                description="Назначать и снимать руководителей регионов может только администрация.",
                 color=disnake.Color.red()
             )
             return await inter.edit_original_message(embed=embed)
@@ -124,6 +127,22 @@ class RegionsCog(commands.Cog):
             )
             return await inter.edit_original_message(embed=embed)
 
+        # Вариант 1: Снятие руководителя (лидер не указан)
+        if member is None:
+            await update_region_owner(region_name, None)
+
+            embed = create_embed(
+                title="🏛️ Руководитель региона снят",
+                description=(
+                    f"**Регион:** «{region_name}»\n"
+                    f"**Текущий статус:** `Без руководителя`\n"
+                    f"**Приказ издал:** {inter.author.mention}"
+                ),
+                color=disnake.Color.orange()
+            )
+            return await inter.edit_original_message(embed=embed)
+
+        # Вариант 2: Назначение нового руководителя
         if not await is_user_registered(member.id):
             embed = create_embed(
                 title="❌ Ошибка регистрации",
@@ -132,7 +151,6 @@ class RegionsCog(commands.Cog):
             )
             return await inter.edit_original_message(embed=embed)
 
-        # Закрепляем ID в столбце owner таблицы regions
         await update_region_owner(region_name, member.id)
 
         embed = create_embed(

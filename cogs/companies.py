@@ -1,4 +1,5 @@
 from typing import Optional
+import aiosqlite
 import disnake
 from disnake.ext import commands
 
@@ -91,6 +92,10 @@ class CompaniesCog(commands.Cog):
             name="тип_компании",
             description="Тип создаваемой организации",
             choices=["Бизнес", "НКО", "СМИ"]
+        ),
+        создавать_канал: bool = commands.Param(
+            default=True,
+            description="Создавать ли автоматический канал/форум для компании? (По умолчанию: Да)"
         )
     ):
         await inter.response.defer(ephemeral=True)
@@ -120,99 +125,103 @@ class CompaniesCog(commands.Cog):
             )
             return await inter.edit_original_message(embed=embed)
 
-        # 3. Получение родительской категории
-        if company_type == "СМИ":
-            category = inter.guild.get_channel(MEDIA_CATEGORY_ID)
-        else:
-            category = inter.guild.get_channel(COMPANY_CATEGORY_ID)
+        channel = None
+        channel_type_label = "Не создан"
 
-        if not isinstance(category, disnake.CategoryChannel):
-            embed = create_embed(
-                title="❌ Ошибка конфигурации",
-                description="Указанная категория для компаний не найдена на сервере.",
-                color=disnake.Color.red()
-            )
-            return await inter.edit_original_message(embed=embed)
+        # 3. Создание канала (если флаг True)
+        if создавать_канал:
+            if company_type == "СМИ":
+                category = inter.guild.get_channel(MEDIA_CATEGORY_ID)
+            else:
+                category = inter.guild.get_channel(COMPANY_CATEGORY_ID)
 
-        # 4. Настройка прав доступа и создание канала
-        # Для СМИ — текстовый канал (create_text_channel), для Бизнеса/НКО — форум (create_forum_channel)
-        if company_type == "СМИ":
-            overwrites = {
-                inter.guild.default_role: disnake.PermissionOverwrite(
-                    view_channel=True,
-                    read_message_history=True,
-                    send_messages=False,
-                    create_public_threads=False,
-                    create_private_threads=False
-                ),
-                пользователь: disnake.PermissionOverwrite(
-                    view_channel=True,
-                    read_message_history=True,
-                    send_messages=True,
-                    attach_files=True,
-                    embed_links=True
-                )
-            }
-            try:
-                channel = await category.create_text_channel(
-                    name=f"📰・{название}",
-                    overwrites=overwrites,
-                    topic=f"СМИ «{название}». Владелец: {пользователь.display_name} | Тип: {company_type}"
-                )
-            except Exception as e:
+            if not isinstance(category, disnake.CategoryChannel):
                 embed = create_embed(
-                    title="❌ Ошибка при создании канала",
-                    description=f"Не удалось создать текстовый канал СМИ. Проверьте права бота.\n`{e}`",
-                    color=disnake.Color.red()
-                )
-                return await inter.edit_original_message(embed=embed)
-        else:
-            overwrites = {
-                inter.guild.default_role: disnake.PermissionOverwrite(
-                    view_channel=True,
-                    read_message_history=True,
-                    create_public_threads=False,
-                    create_private_threads=False,
-                    send_messages_in_threads=False,
-                    send_messages=False
-                ),
-                пользователь: disnake.PermissionOverwrite(
-                    view_channel=True,
-                    read_message_history=True,
-                    create_public_threads=True,
-                    send_messages_in_threads=True,
-                    send_messages=True
-                )
-            }
-            try:
-                channel = await category.create_forum_channel(
-                    name=f"❮🏢❯・{название}",
-                    overwrites=overwrites,
-                    topic=f"Организация «{название}». Владелец: {пользователь.display_name} | Тип: {company_type}"
-                )
-            except Exception as e:
-                embed = create_embed(
-                    title="❌ Ошибка при создании форума",
-                    description=f"Не удалось создать форум компании. Проверьте права бота.\n`{e}`",
+                    title="❌ Ошибка конфигурации",
+                    description="Указанная категория для компаний не найдена на сервере.",
                     color=disnake.Color.red()
                 )
                 return await inter.edit_original_message(embed=embed)
 
-        # Перемещаем созданный канал в самый низ категории
-        try:
-            bottom_pos = max((c.position for c in category.channels), default=0) + 1
-            await channel.edit(position=bottom_pos)
-        except Exception:
-            pass
+            if company_type == "СМИ":
+                overwrites = {
+                    inter.guild.default_role: disnake.PermissionOverwrite(
+                        view_channel=True,
+                        read_message_history=True,
+                        send_messages=False,
+                        create_public_threads=False,
+                        create_private_threads=False
+                    ),
+                    пользователь: disnake.PermissionOverwrite(
+                        view_channel=True,
+                        read_message_history=True,
+                        send_messages=True,
+                        attach_files=True,
+                        embed_links=True
+                    )
+                }
+                try:
+                    channel = await category.create_text_channel(
+                        name=f"📰・{название}",
+                        overwrites=overwrites,
+                        topic=f"СМИ «{название}». Владелец: {пользователь.display_name} | Тип: {company_type}"
+                    )
+                    channel_type_label = "Текстовый канал СМИ"
+                except Exception as e:
+                    embed = create_embed(
+                        title="❌ Ошибка при создании канала",
+                        description=f"Не удалось создать текстовый канал СМИ. Проверьте права бота.\n`{e}`",
+                        color=disnake.Color.red()
+                    )
+                    return await inter.edit_original_message(embed=embed)
+            else:
+                overwrites = {
+                    inter.guild.default_role: disnake.PermissionOverwrite(
+                        view_channel=True,
+                        read_message_history=True,
+                        create_public_threads=False,
+                        create_private_threads=False,
+                        send_messages_in_threads=False,
+                        send_messages=False
+                    ),
+                    пользователь: disnake.PermissionOverwrite(
+                        view_channel=True,
+                        read_message_history=True,
+                        create_public_threads=True,
+                        send_messages_in_threads=True,
+                        send_messages=True
+                    )
+                }
+                try:
+                    channel = await category.create_forum_channel(
+                        name=f"❮🏢❯・{название}",
+                        overwrites=overwrites,
+                        topic=f"Организация «{название}». Владелец: {пользователь.display_name} | Тип: {company_type}"
+                    )
+                    channel_type_label = "Форум компании"
+                except Exception as e:
+                    embed = create_embed(
+                        title="❌ Ошибка при создании форума",
+                        description=f"Не удалось создать форум компании. Проверьте права бота.\n`{e}`",
+                        color=disnake.Color.red()
+                    )
+                    return await inter.edit_original_message(embed=embed)
 
-        # 5. Списание средств и сохранение в БД
+            try:
+                bottom_pos = max((c.position for c in category.channels), default=0) + 1
+                await channel.edit(position=bottom_pos)
+            except Exception:
+                pass
+
+        # 4. Списание средств и сохранение в БД
         new_balance = owner_balance - cost
         await update_user_info(пользователь.id, "balance", str(new_balance))
-        company_id = await create_company_db(название, пользователь.id, channel.id, company_type)
+        channel_id = channel.id if channel else None
+        company_id = await create_company_db(название, пользователь.id, channel_id, company_type)
 
-        channel_type_label = "Текстовый канал СМИ" if company_type == "СМИ" else "Форум компании"
+        channel_mention_str = channel.mention if channel else "*Без привязки канала*"
 
-        # 6. Ответ администратору
+        # 5. Ответ администратору
         admin_embed = create_embed(
             title="🏢 Компания успешно создана",
             description=(
@@ -220,7 +229,7 @@ class CompaniesCog(commands.Cog):
                 f"**Название:** `{название}`\n"
                 f"**Тип:** `{company_type}`\n"
                 f"**Владелец:** {пользователь.mention} (`{пользователь.id}`)\n"
-                f"**Канал:** {channel.mention} ({channel_type_label})\n"
+                f"**Канал:** {channel_mention_str} ({channel_type_label})\n"
                 f"**Списано средств:** R$ `-{format_number(cost)}`\n"
                 f"**Остаток у владельца:** R$ `{format_number(new_balance)}`"
             ),
@@ -228,7 +237,8 @@ class CompaniesCog(commands.Cog):
         )
         await inter.edit_original_message(embed=admin_embed)
 
-        # 7. Оповещение владельцу в ЛС
+        # 6. Оповещение владельцу в ЛС
+        dm_channel_text = f"• **Канал:** {channel.mention}\n\n*Вам предоставлены полные права на публикацию материалов в данном канале.*" if channel else "• **Канал:** *Не был создан при регистрации.*"
         dm_embed = create_embed(
             title="🏛️ Регистрация предприятия",
             description=(
@@ -236,8 +246,7 @@ class CompaniesCog(commands.Cog):
                 f"• **ID компании:** `{company_id}`\n"
                 f"• **Тип:** `{company_type}`\n"
                 f"• **Стоимость:** R$ `{format_number(cost)}`\n"
-                f"• **Канал:** {channel.mention}\n\n"
-                f"*Вам предоставлены полные права на публикацию материалов в данном канале.*"
+                f"{dm_channel_text}"
             ),
             color=disnake.Color.gold()
         )
@@ -389,6 +398,61 @@ class CompaniesCog(commands.Cog):
                     footer_text=f"ID компании: {company_id}"
                 )
                 await log_channel.send(embed=log_embed)
+
+
+    @company_group.sub_command(
+        name="set_forum",
+        description="Изменить привязанный канал/форум компании (Только для Администрации)"
+    )
+    @commands.has_permissions(administrator=True)
+    async def company_set_forum(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        компания: int = commands.Param(
+            name="компания",
+            description="Выберите компанию",
+            autocomplete=company_autocomplete
+        ),
+        новый_канал: disnake.abc.GuildChannel = commands.Param(
+            name="канал",
+            description="Новый форум или текстовый канал для компании"
+        )
+    ):
+        await inter.response.defer(ephemeral=True)
+
+        async with aiosqlite.connect("dbs/main.db") as db:
+            async with db.execute("SELECT name, owner_id, channel_id FROM companies WHERE id = ?;", (компания,)) as cursor:
+                company_row = await cursor.fetchone()
+
+            if not company_row:
+                embed = create_embed(
+                    title="❌ Компания не найдена",
+                    description=f"Организация с ID `{компания}` не найдена в базе данных.",
+                    color=disnake.Color.red()
+                )
+                return await inter.edit_original_message(embed=embed)
+
+            comp_name, owner_id, old_channel_id = company_row
+
+            # Обновляем channel_id
+            await db.execute("UPDATE companies SET channel_id = ? WHERE id = ?;", (новый_канал.id, компания))
+            await db.commit()
+
+        old_channel = inter.guild.get_channel(old_channel_id) if old_channel_id else None
+        old_channel_str = old_channel.mention if old_channel else "`Отсутствовал`"
+
+        embed = create_embed(
+            title="🏢 Канал компании обновлен",
+            description=(
+                f"**ID компании:** `{компания}`\n"
+                f"**Организация:** «{comp_name}»\n"
+                f"**Владелец:** <@{owner_id}>\n\n"
+                f"**Предыдущий канал:** {old_channel_str}\n"
+                f"**Новый канал:** {новый_канал.mention}"
+            ),
+            color=disnake.Color.green()
+        )
+        await inter.edit_original_message(embed=embed)
 
 
 
