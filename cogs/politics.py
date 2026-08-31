@@ -6,7 +6,7 @@ import disnake
 from disnake.ext import commands
 
 from functions.db_helpers import create_law_proposal, get_user_info, update_user_info, get_law_proposal, update_law_proposal_status, DB_PATH
-from functions.utils import create_embed, UniversalModal, format_number
+from functions.utils import create_embed, UniversalModal, format_number, ensure_user_registered
 
 # === КОНФИГУРАЦИЯ И СПИСКИ РОЛЕЙ ===
 # ID канала для логирования выдачи/снятия ролей (укажи свой)
@@ -23,7 +23,7 @@ else:
 # Права на голосования
 ALLOWED_TO_CREATE = ["speaker_of_seim", "vice_president_of_rezendia"]
 ALLOWED_TO_VOTE = ["deputy_of_seim"]
-ALLOWED_TO_END = ["speaker_of_seim"]
+ALLOWED_TO_END = ["speaker_of_seim", "vice_president_of_rezendia"]
 
 
 def parse_user_roles(raw_roles) -> list:
@@ -94,6 +94,10 @@ class PoliticsCog(commands.Cog):
         должность: str = commands.Param(description="Выберите должность из списка", autocomplete=role_autocomplete),
         причина: str = commands.Param(default="Не указана", description="Причина назначения")
     ):
+
+        if not await ensure_user_registered(inter, пользователь.id):
+            return
+        
         raw_roles = await get_user_info(пользователь.id, "functions")
         user_roles = parse_user_roles(raw_roles)
 
@@ -164,6 +168,10 @@ class PoliticsCog(commands.Cog):
         должность: str = commands.Param(description="Выберите должность из списка", autocomplete=role_autocomplete),
         причина: str = commands.Param(default="Не указана", description="Причина снятия")
     ):
+
+        if not await ensure_user_registered(inter, пользователь.id):
+            return
+        
         raw_roles = await get_user_info(пользователь.id, "functions")
         user_roles = parse_user_roles(raw_roles)
 
@@ -239,6 +247,10 @@ class PoliticsCog(commands.Cog):
         пользователь: disnake.Member = commands.Param(description="Пользователь, которому устанавливается мандат"),
         количество: int = commands.Param(description="Количество мандатных мест", ge=0)
     ):
+        
+        if not await ensure_user_registered(inter, пользователь.id):
+            return
+        
         await update_user_info(пользователь.id, "mandates", количество)
 
         embed = create_embed(

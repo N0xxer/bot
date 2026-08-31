@@ -19,7 +19,7 @@ from functions.db_helpers import (
 
 )
 
-from functions.utils import create_embed, format_number
+from functions.utils import create_embed, format_number, ensure_user_registered
 
 CONFIG_PATH = "configs/regions_config.json"
 if os.path.exists(CONFIG_PATH):
@@ -102,13 +102,17 @@ class RegionsCog(commands.Cog):
     async def region_leader(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        region_name: str = commands.Param(name="region", description="Выберите регион", autocomplete=region_autocomplete),
+        region_name: str = commands.Param(name="регион", description="Выберите регион", autocomplete=region_autocomplete),
         member: Optional[disnake.Member] = commands.Param(
+            name="пользователь",
             default=None,
             description="Пользователь для назначения (оставьте пустым, чтобы снять лидера)"
         )
     ):
         await inter.response.defer(ephemeral=True)
+
+        if not await ensure_user_registered(inter, member.id):
+            return
 
         if not inter.author.guild_permissions.administrator:
             embed = create_embed(
@@ -193,7 +197,7 @@ class RegionsCog(commands.Cog):
     async def region_info(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        region_name: str = commands.Param(name="region", description="Выберите регион", autocomplete=region_autocomplete)
+        region_name: str = commands.Param(name="регион", description="Выберите регион", autocomplete=region_autocomplete)
     ):
         await inter.response.defer()
 

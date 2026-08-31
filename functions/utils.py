@@ -1,5 +1,7 @@
 import disnake
-from typing import Callable, List, Awaitable
+from typing import Callable, List, Awaitable, Union
+from functions.db_helpers import is_user_registered
+from disnake.ext import commands
 
 
 def create_embed(
@@ -47,3 +49,33 @@ class UniversalModal(disnake.ui.Modal):
 
     async def callback(self, inter: disnake.ModalInteraction):
         await self.callback_func(inter, inter.text_values)
+
+
+
+async def ensure_user_registered(ctx_or_inter: Union[disnake.Interaction, commands.Context], user_id: int) -> bool:
+    """
+    Проверяет регистрацию. Если не зарегистрирован — отправляет отказ и возвращает False.
+    Работает как со слэш-командами (Interaction), так и с префиксными (Context).
+    """
+    if not await is_user_registered(user_id):
+        embed = create_embed(
+            title="⚠️ Требуется регистрация",
+            description=(
+                "Вы не зарегистрированы в государственной базе данных!\n\n"
+                "Для использования этой команды необходимо пройти регистрацию персонажа."
+            ),
+            color=disnake.Color.orange()
+        )
+
+        if isinstance(ctx_or_inter, disnake.Interaction):
+            if ctx_or_inter.response.is_done():
+                await ctx_or_inter.edit_original_message(embed=embed)
+            else:
+                await ctx_or_inter.response.send_message(embed=embed, ephemeral=True)
+        else:
+            # Для префиксных команд (commands.Context)
+            await ctx_or_inter.reply(embed=embed)
+
+        return False
+
+    return True

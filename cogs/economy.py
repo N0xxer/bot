@@ -6,7 +6,7 @@ import aiosqlite
 from typing import Optional
 
 from functions.db_helpers import get_user_info, update_user_info, DB_PATH
-from functions.utils import create_embed, format_number, UniversalModal
+from functions.utils import create_embed, format_number, UniversalModal, ensure_user_registered
 
 # Загрузка конфигурации ролей
 with open("configs/function_roles_config.json", "r", encoding="utf-8") as f:
@@ -52,6 +52,8 @@ class EconomyCog(commands.Cog):
         """Карточка гражданина: ФИО, баланс, список должностей и доходы."""
         target = пользователь or inter.author
         target_id = target.id
+        if not await ensure_user_registered(inter, target_id):
+            return
 
         # 1. Получение данных пользователя из БД
         balance = await get_user_info(target_id, "balance") or 0
@@ -122,6 +124,8 @@ class EconomyCog(commands.Cog):
     ):
         """Слэш-команда проверки баланса."""
         target = member or inter.author
+        if not await ensure_user_registered(inter, target.id):
+            return
         
         # Получаем данные из функции БД
         user_balance = await get_user_info(target.id, "balance") or 0
@@ -143,6 +147,9 @@ class EconomyCog(commands.Cog):
     )
     async def collect(self, inter: disnake.ApplicationCommandInteraction):
         user_id = inter.author.id
+        
+        if not await ensure_user_registered(inter, user_id):
+            return
         current_time = int(time.time())
 
         balance = await get_user_info(user_id, "balance") or 0
@@ -232,6 +239,12 @@ class EconomyCog(commands.Cog):
         """Перевод средств между пользователями."""
         sender_id = inter.author.id
         receiver_id = пользователь.id
+        
+        if not await ensure_user_registered(inter, sender_id):
+            return
+        
+        if not await ensure_user_registered(inter, receiver_id):
+            return
 
         if sender_id == receiver_id:
             embed = create_embed(
@@ -294,6 +307,9 @@ class EconomyCog(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def add(self, inter: disnake.ApplicationCommandInteraction, пользователь: disnake.Member, количество: int):
         """Выдача средств пользователю администратором."""
+        if not await ensure_user_registered(inter, пользователь.id):
+            return
+        
         if количество <= 0:
             embed = create_embed(
                 title="❌ Некорректная сумма",
@@ -338,6 +354,9 @@ class EconomyCog(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def remove(self, inter: disnake.ApplicationCommandInteraction, пользователь: disnake.Member, количество: int):
         """Снятие средств с пользователя администратором."""
+        if not await ensure_user_registered(inter, пользователь.id):
+            return
+        
         if количество <= 0:
             embed = create_embed(
                 title="❌ Некорректная сумма",
@@ -390,6 +409,10 @@ class EconomyCog(commands.Cog):
     )
     async def work(self, inter: disnake.ApplicationCommandInteraction):
         user_id = inter.author.id
+        
+        if not await ensure_user_registered(inter, user_id):
+            return
+        
         current_time = int(time.time())
 
         # Константы накопления: 5 монет/мин, лимит 6 часов (360 минут = 1800 монет)
@@ -958,6 +981,9 @@ class EconomyCog(commands.Cog):
         target = member or ctx.author
         target_id = target.id
 
+        if not await ensure_user_registered(ctx, target_id):
+            return
+
         # 1. Получение данных пользователя из БД
         balance = await get_user_info(target_id, "balance") or 0
         fio = await get_user_info(target_id, "FIO")
@@ -1020,7 +1046,11 @@ class EconomyCog(commands.Cog):
     )
     async def collect_second(self, ctx: commands.Context):
         user_id = ctx.author.id
+
+        if not await ensure_user_registered(ctx, user_id):
+            return
         current_time = int(time.time())
+
 
         balance = await get_user_info(user_id, "balance") or 0
         last_collection = await get_user_info(user_id, "last_collection")
@@ -1102,6 +1132,10 @@ class EconomyCog(commands.Cog):
     )
     async def work_second(self, ctx: commands.Context):
         user_id = ctx.author.id
+
+        if not await ensure_user_registered(ctx, user_id):
+            return
+
         current_time = int(time.time())
 
         RATE_PER_MINUTE = 5
@@ -1185,6 +1219,9 @@ class EconomyCog(commands.Cog):
     ):
         """Префиксная команда проверки баланса (например: !balance @user)."""
         target = member or ctx.author
+
+        if not await ensure_user_registered(ctx, target.id):
+            return
 
         # Получаем данные из функции БД
         user_balance = await get_user_info(target.id, "balance") or 0
