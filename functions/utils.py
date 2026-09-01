@@ -1,7 +1,10 @@
 import disnake
 from typing import Callable, List, Awaitable, Union
+
+from matplotlib.pyplot import title
 from functions.db_helpers import is_user_registered
 from disnake.ext import commands
+
 
 
 def create_embed(
@@ -79,3 +82,17 @@ async def ensure_user_registered(ctx_or_inter: Union[disnake.Interaction, comman
         return False
 
     return True
+
+
+
+async def notification_send(
+    ctx_or_inter: Union[disnake.Interaction, commands.Context],
+    title: str,
+    description: str,
+    color: disnake.Color = disnake.Color.blue(),
+    footer_text: str = None
+):
+    log_channel_id = 1520135463699087521
+    log_channel = ctx_or_inter.guild.get_channel(log_channel_id)
+    embed = create_embed(title=title, description=description, color=color, footer_text=footer_text)
+    await log_channel.send(embed=embed)
