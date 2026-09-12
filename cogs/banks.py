@@ -28,7 +28,7 @@ class BanksCog(commands.Cog):
     """Банковская система Резендии."""
     
     # ID категории для создания каналов банков
-    BANK_CATEGORY_ID = 1526549976078094488
+    BANK_CATEGORY_ID = 1548395973338996836
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
