@@ -212,7 +212,7 @@ class CompaniesCog(commands.Cog):
 
         # 4. Списание средств и сохранение в БД
         new_balance = owner_balance - cost
-        await update_user_info(пользователь.id, "balance", str(new_balance))
+        await update_user_info(пользователь.id, "balance", int(new_balance))
         channel_id = channel.id if channel else None
         company_id = await create_company_db(название, пользователь.id, channel_id, company_type)
 

@@ -402,6 +402,52 @@ class EconomyCog(commands.Cog):
             pass
 
 
+    @money.sub_command(
+        name="use",
+        description="Потратить (сжечь) наличные деньги"
+    )
+    async def money_use(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        количество: int = commands.Param(description="Сумма для сжигания", min_value=1),
+        причина: str = commands.Param(default="Личные расходы", description="На что потрачены средства")
+    ):
+        """Уничтожение (списание) наличных средств пользователя."""
+        user_id = inter.author.id
+
+        if not await ensure_user_registered(inter, user_id):
+            return
+
+        user_balance = await get_user_info(user_id, "balance") or 0
+
+        if user_balance < количество:
+            embed = create_embed(
+                title="❌ Недостаточно средств",
+                description=(
+                    f"У вас недостаточно наличных средств!\n\n"
+                    f"• Ваш баланс: `{format_number(user_balance)}` R$\n"
+                    f"• Требуется: `{format_number(количество)}` R$"
+                ),
+                color=disnake.Color.red()
+            )
+            return await inter.response.send_message(embed=embed, ephemeral=True)
+
+        new_balance = user_balance - количество
+        await update_user_info(user_id, "balance", new_balance)
+
+        embed = create_embed(
+            title="🔥 Средства потрачены",
+            description=(
+                f"Вы потратили `{format_number(количество)}` R$.\n"
+                f"**Причина:** {причина}\n\n"
+                f"💳 **Остаток на руках:** `{format_number(new_balance)}` R$"
+            ),
+            color=disnake.Color.orange(),
+            footer_text=f"Пользователь: {inter.author.display_name}"
+        )
+        await inter.response.send_message(embed=embed)
+
+
 
     @commands.slash_command(
         name="work",
@@ -1403,6 +1449,55 @@ class EconomyCog(commands.Cog):
             await member.send(embed=embed_user)
         except disnake.Forbidden:
             pass
+
+
+    @money_group_prefix.command(
+        name="use",
+        aliases=["burn", "потратить", "сжечь"],
+        description="Потратить (сжечь) наличные деньги"
+    )
+    async def use_prefix(self, ctx: commands.Context, amount: int, *, reason: str = "Личные расходы"):
+        user_id = ctx.author.id
+
+        if not await ensure_user_registered(ctx, user_id):
+            return
+
+        if amount <= 0:
+            embed = create_embed(
+                title="❌ Некорректная сумма",
+                description="Сумма должна быть положительным числом.",
+                color=disnake.Color.red()
+            )
+            return await ctx.reply(embed=embed)
+
+        user_balance = await get_user_info(user_id, "balance") or 0
+
+        if user_balance < amount:
+            embed = create_embed(
+                title="❌ Недостаточно средств",
+                description=(
+                    f"У вас недостаточно средств!\n\n"
+                    f"• Ваш баланс: `{format_number(user_balance)}` R$\n"
+                    f"• Требуется: `{format_number(amount)}` R$"
+                ),
+                color=disnake.Color.red()
+            )
+            return await ctx.reply(embed=embed)
+
+        new_balance = user_balance - amount
+        await update_user_info(user_id, "balance", new_balance)
+
+        embed = create_embed(
+            title="🔥 Средства потрачены",
+            description=(
+                f"Вы потратили `{format_number(amount)}` R$.\n"
+                f"**Причина:** {reason}\n\n"
+                f"💳 **Остаток на руках:** `{format_number(new_balance)}` R$"
+            ),
+            color=disnake.Color.orange(),
+            footer_text=f"Пользователь: {ctx.author.display_name}"
+        )
+        await ctx.reply(embed=embed)
 
 
 
