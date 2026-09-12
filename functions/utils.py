@@ -95,3 +95,23 @@ async def notification_send(
     log_channel = ctx_or_inter.guild.get_channel(log_channel_id)
     embed = create_embed(title=title, description=description, color=color, footer_text=footer_text)
     await log_channel.send(embed=embed)
+
+
+
+async def ensure_admin(inter: disnake.ApplicationCommandInteraction) -> bool:
+    """
+    Проверяет наличие прав администратора у пользователя.
+    Если прав нет — отправляет отказ и возвращает False.
+    """
+    if not inter.author.guild_permissions.administrator:
+        embed = create_embed(
+            title="⛔ Доступ запрещен",
+            description="У вас недостаточно полномочий для выполнения этой команды.",
+            color=disnake.Color.red()
+        )
+        if inter.response.is_done():
+            await inter.edit_original_message(embed=embed)
+        else:
+            await inter.response.send_message(embed=embed, ephemeral=True)
+        return False
+    return True

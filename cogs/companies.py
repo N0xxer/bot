@@ -9,9 +9,10 @@ from functions.db_helpers import (
     create_company_db,
     get_company_by_id,
     delete_company_db,
-    is_user_registered
+    is_user_registered,
+    DB_PATH
 )
-from functions.utils import create_embed, format_number
+from functions.utils import create_embed, format_number, ensure_admin
 
 # ID родительской категории для создания форумов
 COMPANY_CATEGORY_ID = 1526549976078094488
@@ -61,13 +62,6 @@ class CompaniesCog(commands.Cog):
         description="Система управления компаниями"
     )
     async def company_group(self, inter: disnake.ApplicationCommandInteraction):
-        if not inter.author.guild_permissions.administrator:
-            embed = create_embed(
-                title="⛔ Доступ запрещен",
-                description="Создавать компании может только администрация сервера.",
-                color=disnake.Color.red()
-            )
-            return await inter.response.send_message(embed=embed, ephemeral=True)
         pass
 
 
@@ -97,7 +91,10 @@ class CompaniesCog(commands.Cog):
             default=True,
             description="Создавать ли автоматический канал/форум для компании? (По умолчанию: Да)"
         )
-    ):
+    ):        
+        if not await ensure_admin(inter):
+            return
+        
         await inter.response.defer(ephemeral=True)
 
         # 1. Проверка регистрации владельца
@@ -266,6 +263,9 @@ class CompaniesCog(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         компания: int = commands.Param(name="компания", description="Выберите компанию для ликвидации", autocomplete=company_autocomplete)
     ):
+        if not await ensure_admin(inter):
+            return
+
         await inter.response.defer(ephemeral=True)
 
         company = await get_company_by_id(компания)
@@ -404,7 +404,6 @@ class CompaniesCog(commands.Cog):
         name="set_forum",
         description="Изменить привязанный канал/форум компании (Только для Администрации)"
     )
-    @commands.has_permissions(administrator=True)
     async def company_set_forum(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -418,9 +417,12 @@ class CompaniesCog(commands.Cog):
             description="Новый форум или текстовый канал для компании"
         )
     ):
+        if not await ensure_admin(inter):
+            return
+
         await inter.response.defer(ephemeral=True)
 
-        async with aiosqlite.connect("dbs/main.db") as db:
+        async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT name, owner_id, channel_id FROM companies WHERE id = ?;", (компания,)) as cursor:
                 company_row = await cursor.fetchone()
 
@@ -804,6 +806,9 @@ class CompaniesCog(commands.Cog):
         компания: int = commands.Param(name="компания", description="Выберите компанию", autocomplete=company_autocomplete),
         сумма: int = commands.Param(name="сумма", description="Сумма для пополнения", min_value=1)
     ):
+        if not await ensure_admin(inter):
+            return
+
         await inter.response.defer(ephemeral=True)
 
         company = await get_company_by_id(компания)
@@ -875,6 +880,9 @@ class CompaniesCog(commands.Cog):
         компания: int = commands.Param(name="компания", description="Выберите компанию", autocomplete=company_autocomplete),
         сумма: int = commands.Param(name="сумма", description="Сумма для снятия", min_value=1)
     ):
+        if not await ensure_admin(inter):
+            return
+
         await inter.response.defer(ephemeral=True)
 
         company = await get_company_by_id(компания)
