@@ -1021,7 +1021,7 @@ class BanksCog(commands.Cog):
             )
 
         elif custom_id.startswith("confirm_loan:"):
-            _, _, bank_id_str, amount_str, days_str = custom_id.split(":")
+            _, bank_id_str, amount_str, days_str = custom_id.split(":")
             bank_id = int(bank_id_str)
             amount = int(amount_str)
             days = int(days_str)
