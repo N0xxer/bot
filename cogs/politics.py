@@ -337,11 +337,15 @@ class PoliticsCog(commands.Cog):
 
             desc = (
                 f"**Суть вопроса:**\n{question}\n\n"
-                f"📊 **Текущие результаты:**\n"
+                f"📊 **Текущие результаты (мандаты):**\n"
                 f"🟢 За: `0` (0.0%)\n"
                 f"🔴 Против: `0` (0.0%)\n"
                 f"⚪ Воздержались: `0` (0.0%)\n\n"
-                f"Всего проголосовало: `0` чел."
+                f"👥 **Список проголосовавших:**\n"
+                f"🟢 **За:** —\n"
+                f"🔴 **Против:** —\n"
+                f"⚪ **Воздержались:** —\n\n"
+                f"Всего голосов: `0` | Проголосовало: `0` чел."
             )
             embed = create_embed(
                 title="🗳️ Политическое голосование",
@@ -365,8 +369,6 @@ class PoliticsCog(commands.Cog):
             custom_id="vote_create_modal"
         )
         await inter.response.send_modal(modal)
-
-
 
     @commands.Cog.listener("on_button_click")
     async def handle_voting_buttons(self, inter: disnake.MessageInteraction):
@@ -396,11 +398,18 @@ class PoliticsCog(commands.Cog):
                 question, raw_votes = row
                 votes_dict = json.loads(raw_votes) if raw_votes else {}
 
-        # Функция для извлечения выбора и веса голоса (с поддержкой старых записей)
         def parse_vote(entry):
             if isinstance(entry, dict):
                 return entry.get("action"), int(entry.get("weight", 1))
             return str(entry), 1
+
+        def build_voter_lines(target_action):
+            entries = []
+            for uid, val in votes_dict.items():
+                act, weight = parse_vote(val)
+                if act == target_action:
+                    entries.append(f"<@{uid}> (`{weight}` м.)")
+            return ", ".join(entries) if entries else "—"
 
         # --- ЗАВЕРШЕНИЕ ГОЛОСОВАНИЯ ---
         if action == "end":
@@ -431,6 +440,10 @@ class PoliticsCog(commands.Cog):
             else:
                 verdict = "⚖️ **Ничья.** Решение не принято."
 
+            voters_for = build_voter_lines("for")
+            voters_against = build_voter_lines("against")
+            voters_abstain = build_voter_lines("abstain")
+
             final_desc = (
                 f"**Суть вопроса:**\n{question}\n\n"
                 f"📌 **Итоги:**\n{verdict}\n\n"
@@ -438,6 +451,10 @@ class PoliticsCog(commands.Cog):
                 f"🟢 За: `{count_for}` ({pct_for:.1f}%)\n"
                 f"🔴 Против: `{count_against}` ({pct_against:.1f}%)\n"
                 f"⚪ Воздержались: `{count_abstain}` ({pct_abstain:.1f}%)\n\n"
+                f"👥 **Итоговые голоса:**\n"
+                f"🟢 **За:** {voters_for}\n"
+                f"🔴 **Против:** {voters_against}\n"
+                f"⚪ **Воздержались:** {voters_abstain}\n\n"
                 f"Всего голосов: `{total_votes}` | Проголосовало: `{total_users}` чел."
             )
 
@@ -466,11 +483,9 @@ class PoliticsCog(commands.Cog):
             )
             return await inter.response.send_message(embed=embed, ephemeral=True)
 
-        # Получаем количество мандатов пользователя (вес голоса)
         raw_mandates = await get_user_info(inter.author.id, "mandates")
         vote_weight = int(raw_mandates) if raw_mandates and int(raw_mandates) > 0 else 1
 
-        # Записываем действие и вес мандатов
         votes_dict[user_id] = {
             "action": action,
             "weight": vote_weight
@@ -483,7 +498,6 @@ class PoliticsCog(commands.Cog):
             )
             await db.commit()
 
-        # Подсчет суммы с учетом веса мандатов
         count_for = sum(parse_vote(v)[1] for v in votes_dict.values() if parse_vote(v)[0] == "for")
         count_against = sum(parse_vote(v)[1] for v in votes_dict.values() if parse_vote(v)[0] == "against")
         count_abstain = sum(parse_vote(v)[1] for v in votes_dict.values() if parse_vote(v)[0] == "abstain")
@@ -494,12 +508,20 @@ class PoliticsCog(commands.Cog):
         pct_against = (count_against / total_votes * 100) if total_votes > 0 else 0.0
         pct_abstain = (count_abstain / total_votes * 100) if total_votes > 0 else 0.0
 
+        voters_for = build_voter_lines("for")
+        voters_against = build_voter_lines("against")
+        voters_abstain = build_voter_lines("abstain")
+
         updated_desc = (
             f"**Суть вопроса:**\n{question}\n\n"
             f"📊 **Текущие результаты (мандаты):**\n"
             f"🟢 За: `{count_for}` ({pct_for:.1f}%)\n"
             f"🔴 Против: `{count_against}` ({pct_against:.1f}%)\n"
             f"⚪ Воздержались: `{count_abstain}` ({pct_abstain:.1f}%)\n\n"
+            f"👥 **Список проголосовавших:**\n"
+            f"🟢 **За:** {voters_for}\n"
+            f"🔴 **Против:** {voters_against}\n"
+            f"⚪ **Воздержались:** {voters_abstain}\n\n"
             f"Всего голосов: `{total_votes}` | Проголосовало: `{total_users}` чел."
         )
 

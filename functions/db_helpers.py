@@ -3,6 +3,7 @@ import aiosqlite
 import os
 import json
 from pathlib import Path
+import random
 
 # Приоритет переменной окружения хостинга (/app/data/main.db), локально — data/main.db
 DB_PATH = os.getenv("DATABASE_PATH", str(Path("data/main.db").resolve()))
@@ -25,6 +26,7 @@ ALLOWED_USER_FIELDS = {
 async def init_db():
     """Создает необходимые таблицы при первом запуске бота."""
     async with aiosqlite.connect(DB_PATH) as db:
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -37,6 +39,7 @@ async def init_db():
                 mandates INTEGER DEFAULT 0
             )
         """)
+        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS companies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,6 +50,7 @@ async def init_db():
                 company_type TEXT DEFAULT 'Бизнес'
             )
         """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS country (
                 name TEXT PRIMARY KEY,
@@ -63,6 +67,7 @@ async def init_db():
                 date TEXT DEFAULT NULL
             )
         """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS regions (
                 name TEXT PRIMARY KEY,
@@ -78,6 +83,8 @@ async def init_db():
                 balance INTEGER DEFAULT 0
             )
         """)
+
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS votings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,7 +110,7 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        await db.commit()
+
 
 
 async def is_user_registered(user_id: int) -> bool:
@@ -311,3 +318,154 @@ async def update_law_proposal_status(proposal_id: int, status: str, reviewed_by:
             (status, reviewed_by, reject_reason, voting_poll_id, proposal_id)
         )
         await db.commit()
+
+
+# ==========================================
+#              БАНКОВСКАЯ СИСТЕМА
+# ==========================================
+
+
+
+async def init_bank_db():
+    """Инициализация расширенных таблиц банковской системы."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS banks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL DEFAULT 'коммерческий',
+                owner_id INTEGER,
+                balance INTEGER NOT NULL DEFAULT 0,
+                interest_rate REAL NOT NULL DEFAULT 5.0,
+                control_channel_id INTEGER DEFAULT NULL,
+                log_channel_id INTEGER DEFAULT NULL,
+                control_message_id INTEGER DEFAULT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bank_accounts (
+                account_number TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                bank_id INTEGER NOT NULL,
+                balance INTEGER NOT NULL DEFAULT 0,
+                is_frozen BOOLEAN NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                FOREIGN KEY (bank_id) REFERENCES banks(id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bank_loans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                bank_id INTEGER NOT NULL,
+                account_number TEXT NOT NULL,
+                original_amount INTEGER NOT NULL,
+                total_debt INTEGER NOT NULL,
+                remaining_debt INTEGER NOT NULL,
+                period_payment INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                next_payment_time INTEGER NOT NULL,
+                is_closed BOOLEAN NOT NULL DEFAULT 0,
+                FOREIGN KEY (account_number) REFERENCES bank_accounts(account_number),
+                FOREIGN KEY (bank_id) REFERENCES banks(id)
+            )
+        """)
+        await db.commit()
+
+async def generate_unique_account_number(bank_id: int) -> str:
+    """Генерация уникального расчетного счета."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        while True:
+            acc_num = f"{40800 + bank_id:05d}-{random.randint(1000, 9999)}"
+            async with db.execute("SELECT 1 FROM bank_accounts WHERE account_number = ?", (acc_num,)) as cursor:
+                if not await cursor.fetchone():
+                    return acc_num
+
+async def get_all_banks():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM banks") as cursor:
+            return await cursor.fetchall()
+
+async def get_bank(bank_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM banks WHERE id = ?", (bank_id,)) as cursor:
+            return await cursor.fetchone()
+
+async def get_bank_by_name(name: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM banks WHERE name = ?", (name,)) as cursor:
+            return await cursor.fetchone()
+
+async def get_account_by_number(account_number: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT a.*, b.name as bank_name, b.type as bank_type, b.interest_rate, b.log_channel_id
+            FROM bank_accounts a
+            JOIN banks b ON a.bank_id = b.id
+            WHERE a.account_number = ?
+        """, (account_number,)) as cursor:
+            return await cursor.fetchone()
+
+async def get_user_accounts(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT a.*, b.name as bank_name, b.type as bank_type 
+            FROM bank_accounts a
+            JOIN banks b ON a.bank_id = b.id
+            WHERE a.user_id = ?
+        """, (user_id,)) as cursor:
+            return await cursor.fetchall()
+
+async def get_bank_accounts(bank_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT a.*, u.FIO 
+            FROM bank_accounts a
+            LEFT JOIN users u ON a.user_id = u.user_id
+            WHERE a.bank_id = ?
+        """, (bank_id,)) as cursor:
+            return await cursor.fetchall()
+
+async def get_bank_total_issued_loans(bank_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT SUM(remaining_debt) FROM bank_loans WHERE bank_id = ? AND is_closed = 0",
+            (bank_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] or 0
+
+
+async def get_user_loans(user_id: int, only_active: bool = True):
+    """Получить кредиты пользователя."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = """
+            SELECT l.*, b.name as bank_name, b.interest_rate
+            FROM bank_loans l
+            JOIN banks b ON l.bank_id = b.id
+            WHERE l.user_id = ?
+        """
+        if only_active:
+            query += " AND l.is_closed = 0"
+        async with db.execute(query, (user_id,)) as cursor:
+            return await cursor.fetchall()
+
+async def get_loan_by_id(loan_id: int):
+    """Получить конкретный кредит по ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT l.*, b.name as bank_name, b.interest_rate, b.log_channel_id
+            FROM bank_loans l
+            JOIN banks b ON l.bank_id = b.id
+            WHERE l.id = ?
+        """, (loan_id,)) as cursor:
+            return await cursor.fetchone()

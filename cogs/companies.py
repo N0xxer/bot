@@ -793,6 +793,162 @@ class CompaniesCog(commands.Cog):
 
 
 
+    @company_money_group.sub_command(
+        name="add",
+        description="Пополнить казну компании (Администрация)"
+    )
+    @commands.has_permissions(administrator=True)
+    async def company_money_add(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        компания: int = commands.Param(name="компания", description="Выберите компанию", autocomplete=company_autocomplete),
+        сумма: int = commands.Param(name="сумма", description="Сумма для пополнения", min_value=1)
+    ):
+        await inter.response.defer(ephemeral=True)
+
+        company = await get_company_by_id(компания)
+        if not company:
+            embed = create_embed(
+                title="❌ Ошибка",
+                description=f"Компания с ID `{компания}` не найдена в базе данных.",
+                color=disnake.Color.red()
+            )
+            return await inter.edit_original_message(embed=embed)
+
+        new_balance = company["balance"] + сумма
+        await update_company_balance(компания, new_balance)
+
+        embed = create_embed(
+            title="✅ Казна компании пополнена",
+            description=(
+                f"В казну компании **{company['name']}** (ID: `{компания}`) успешно начислено: `+{format_number(сумма)}` R$.\n\n"
+                f"**Новый баланс компании:** `{format_number(new_balance)}` R$"
+            ),
+            color=disnake.Color.green(),
+            footer_text=f"Администратор: {inter.author.display_name}"
+        )
+        await inter.edit_original_message(embed=embed)
+
+        # Уведомление владельцу компании в ЛС
+        owner = self.bot.get_user(company["owner_id"])
+        if owner and company["owner_id"] != inter.author.id:
+            dm_embed = create_embed(
+                title="💰 Начисление в казну компании",
+                description=(
+                    f"Администратор {inter.author.mention} пополнил баланс вашей компании **{company['name']}**!\n\n"
+                    f"**Начислено:** `+{format_number(сумма)}` R$\n"
+                    f"**Текущий баланс компании:** `{format_number(new_balance)}` R$"
+                ),
+                color=disnake.Color.green()
+            )
+            try:
+                await owner.send(embed=dm_embed)
+            except disnake.Forbidden:
+                pass
+
+        # Логирование операции в канал логов
+        log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            log_embed = create_embed(
+                title="🏛️ Пополнение казны компании (Админ)",
+                description=(
+                    f"**Администратор:** {inter.author.mention} (`{inter.author.id}`)\n"
+                    f"**Компания:** {company['name']} (ID: `{компания}`)\n"
+                    f"**Владелец:** <@{company['owner_id']}>\n"
+                    f"**Сумма:** `+{format_number(сумма)}` R$\n"
+                    f"**Итоговый баланс:** `{format_number(new_balance)}` R$"
+                ),
+                color=disnake.Color.green(),
+                footer_text=f"ID компании: {компания}"
+            )
+            await log_channel.send(embed=log_embed)
+
+
+    @company_money_group.sub_command(
+        name="remove",
+        description="Снять средства из казны компании (Администрация)"
+    )
+    @commands.has_permissions(administrator=True)
+    async def company_money_remove(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        компания: int = commands.Param(name="компания", description="Выберите компанию", autocomplete=company_autocomplete),
+        сумма: int = commands.Param(name="сумма", description="Сумма для снятия", min_value=1)
+    ):
+        await inter.response.defer(ephemeral=True)
+
+        company = await get_company_by_id(компания)
+        if not company:
+            embed = create_embed(
+                title="❌ Ошибка",
+                description=f"Компания с ID `{компания}` не найдена в базе данных.",
+                color=disnake.Color.red()
+            )
+            return await inter.edit_original_message(embed=embed)
+
+        if company["balance"] < сумма:
+            embed = create_embed(
+                title="❌ Недостаточно средств",
+                description=(
+                    f"В казне компании **{company['name']}** недостаточно средств для снятия!\n\n"
+                    f"**Текущий баланс:** `{format_number(company['balance'])}` R$\n"
+                    f"**Запрошено к снятию:** `{format_number(сумма)}` R$"
+                ),
+                color=disnake.Color.red()
+            )
+            return await inter.edit_original_message(embed=embed)
+
+        new_balance = company["balance"] - сумма
+        await update_company_balance(компания, new_balance)
+
+        embed = create_embed(
+            title="✅ Средства изъяты из казны",
+            description=(
+                f"Из казны компании **{company['name']}** (ID: `{компания}`) успешно списано: `-{format_number(сумма)}` R$.\n\n"
+                f"**Новый баланс компании:** `{format_number(new_balance)}` R$"
+            ),
+            color=disnake.Color.orange(),
+            footer_text=f"Администратор: {inter.author.display_name}"
+        )
+        await inter.edit_original_message(embed=embed)
+
+        # Уведомление владельцу компании в ЛС
+        owner = self.bot.get_user(company["owner_id"])
+        if owner and company["owner_id"] != inter.author.id:
+            dm_embed = create_embed(
+                title="💸 Списание из казны компании",
+                description=(
+                    f"Администратор {inter.author.mention} списал средства с баланса вашей компании **{company['name']}**.\n\n"
+                    f"**Списано:** `-{format_number(сумма)}` R$\n"
+                    f"**Остаток в казне:** `{format_number(new_balance)}` R$"
+                ),
+                color=disnake.Color.red()
+            )
+            try:
+                await owner.send(embed=dm_embed)
+            except disnake.Forbidden:
+                pass
+
+        # Логирование операции в канал логов
+        log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            log_embed = create_embed(
+                title="🏛️ Списание из казны компании (Админ)",
+                description=(
+                    f"**Администратор:** {inter.author.mention} (`{inter.author.id}`)\n"
+                    f"**Компания:** {company['name']} (ID: `{компания}`)\n"
+                    f"**Владелец:** <@{company['owner_id']}>\n"
+                    f"**Сумма:** `-{format_number(сумма)}` R$\n"
+                    f"**Итоговый баланс:** `{format_number(new_balance)}` R$"
+                ),
+                color=disnake.Color.dark_red(),
+                footer_text=f"ID компании: {компания}"
+            )
+            await log_channel.send(embed=log_embed)
+
+
+
+
 
 def setup(bot: commands.Bot):
     bot.add_cog(CompaniesCog(bot))

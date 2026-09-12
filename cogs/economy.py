@@ -497,6 +497,7 @@ class EconomyCog(commands.Cog):
 
 
 
+
     @commands.slash_command(
         name="register",
         description="Зарегистрировать РП-персонажа гражданину (Админ)",
@@ -962,42 +963,33 @@ class EconomyCog(commands.Cog):
 
 
     # ==========================================
-    #            ДУБЛИРОВАНИЕ КОМАНД
+    #            ПРЕФИКСНЫЕ КОМАНДЫ (БЕЗ СЛЕША)
     # ==========================================
 
 
 
     @commands.command(
         name="profile",
-        aliases=["профиль", "пасп", "паспорт"],
+        aliases=["профиль", "паспорт"],
         description="Посмотреть государственный паспорт / профиль гражданина"
     )
-    async def profile_second(
-        self,
-        ctx: commands.Context,
-        member: disnake.Member = None
-    ):
+    async def profile_prefix(self, ctx: commands.Context, member: disnake.Member = None):
         """Карточка гражданина: ФИО, баланс, список должностей и доходы."""
         target = member or ctx.author
         target_id = target.id
-
         if not await ensure_user_registered(ctx, target_id):
             return
 
-        # 1. Получение данных пользователя из БД
         balance = await get_user_info(target_id, "balance") or 0
         fio = await get_user_info(target_id, "FIO")
         roles_raw = await get_user_info(target_id, "functions")
         photo_url = await get_user_info(target_id, "photo")
-        last_collection = await get_user_info(target_id, "last_collection")
         raw_mandates = await get_user_info(target_id, "mandates")
 
-        # 2. Формирование строки мандатов
         mandates_display = ""
         if raw_mandates and int(raw_mandates) > 0:
             mandates_display = f"📜 **Количество мандатных мест:** `{raw_mandates}`\n"
 
-        # 3. Форматирование должностей и подсчет суммарного дохода
         user_roles = parse_roles(roles_raw)
         total_income = 0
         roles_list_str = []
@@ -1015,7 +1007,6 @@ class EconomyCog(commands.Cog):
         roles_display = "\n".join(roles_list_str) if roles_list_str else "Отсутствуют"
         fio_display = fio if fio else "Не заполнено"
 
-        # 4. Сборка описания эмбеда
         desc = (
             f"👤 **ФИО:** `{fio_display}`\n"
             f"💳 **Баланс:** `{format_number(balance)}` R$\n"
@@ -1037,27 +1028,45 @@ class EconomyCog(commands.Cog):
         else:
             embed.set_thumbnail(url=target.display_avatar.url)
 
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed)
+
+    @commands.command(
+        name="balance",
+        aliases=["bal", "баланс"],
+        description="Посмотреть свой баланс или баланс другого пользователя"
+    )
+    async def balance_prefix(self, ctx: commands.Context, member: disnake.Member = None):
+        """Проверка наличного баланса пользователя."""
+        target = member or ctx.author
+        if not await ensure_user_registered(ctx, target.id):
+            return
+
+        user_balance = await get_user_info(target.id, "balance") or 0
+
+        embed = create_embed(
+            title=f"Баланс: {target.display_name}",
+            description=f"На счету пользователя: `{format_number(user_balance)}` R$.",
+            color=disnake.Color.green()
+        )
+        await ctx.reply(embed=embed)
 
     @commands.command(
         name="collect",
-        aliases=["коллект", "собрать"],
+        aliases=["доход", "сбор"],
         description="Получить прибыль от своей деятельности"
     )
-    async def collect_second(self, ctx: commands.Context):
+    async def collect_prefix(self, ctx: commands.Context):
+        """Сбор зарплаты по государственным должностям."""
         user_id = ctx.author.id
-
         if not await ensure_user_registered(ctx, user_id):
             return
+
         current_time = int(time.time())
-
-
         balance = await get_user_info(user_id, "balance") or 0
         last_collection = await get_user_info(user_id, "last_collection")
         roles = await get_user_info(user_id, "functions")
         COOLDOWN_SECONDS = 3 * 24 * 60 * 60
 
-        # Проверка кулдауна
         if last_collection:
             time_passed = current_time - int(last_collection)
             if time_passed < COOLDOWN_SECONDS:
@@ -1067,9 +1076,8 @@ class EconomyCog(commands.Cog):
                     description=f"Вы уже собирали прибыль.\nСледующий сбор доступен: <t:{ready_timestamp}:R> (<t:{ready_timestamp}:F>).",
                     color=disnake.Color.red()
                 )
-                return await ctx.send(embed=embed)
+                return await ctx.reply(embed=embed)
 
-        # Парсинг ролей
         user_roles = []
         if roles:
             try:
@@ -1083,9 +1091,8 @@ class EconomyCog(commands.Cog):
                 description="У вас нет активных должностей для получения дохода.",
                 color=disnake.Color.orange()
             )
-            return await ctx.send(embed=embed)
+            return await ctx.reply(embed=embed)
 
-        # Расчет начислений
         total_income = 0
         collected_details = []
 
@@ -1102,14 +1109,12 @@ class EconomyCog(commands.Cog):
                 description="Ваши текущие роли не приносят дохода.",
                 color=disnake.Color.orange()
             )
-            return await ctx.send(embed=embed)
+            return await ctx.reply(embed=embed)
 
-        # Сохранение в БД
         new_balance = balance + total_income
         await update_user_info(user_id, "balance", str(new_balance))
         await update_user_info(user_id, "last_collection", str(current_time))
 
-        # Ответ пользователю
         desc = (
             f"Вы успешно получили выплату за свои должности!\n\n"
             f"**Начисления:**\n" + "\n".join(collected_details) + "\n\n"
@@ -1123,21 +1128,20 @@ class EconomyCog(commands.Cog):
             color=disnake.Color.green(),
             footer_text="Следующий сбор через 3 дня"
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed)
 
     @commands.command(
         name="work",
         aliases=["работа", "работать"],
         description="Забрать накопленную заработную плату за рабочее время"
     )
-    async def work_second(self, ctx: commands.Context):
+    async def work_prefix(self, ctx: commands.Context):
+        """Рабочая смена с поминутным накоплением."""
         user_id = ctx.author.id
-
         if not await ensure_user_registered(ctx, user_id):
             return
 
         current_time = int(time.time())
-
         RATE_PER_MINUTE = 5
         MAX_HOURS = 6
         MAX_MINUTES = MAX_HOURS * 60
@@ -1154,11 +1158,11 @@ class EconomyCog(commands.Cog):
                     f"Вы приступили к работе!\n\n"
                     f"• Скорость накопления: `+{RATE_PER_MINUTE}` R$ в минуту\n"
                     f"• Максимальное время накопления: `{MAX_HOURS}` часов (до `{format_number(MAX_INCOME)}` R$)\n\n"
-                    f"Вы можете забрать накопленные средства в любой момент, вызвав команду снова."
+                    f"Вы можете забрать накопленные средства в любой момент, введя команду работы снова."
                 ),
                 color=disnake.Color.blue()
             )
-            return await ctx.send(embed=embed)
+            return await ctx.reply(embed=embed)
 
         elapsed_seconds = current_time - int(last_work)
         elapsed_minutes = elapsed_seconds // 60
@@ -1170,7 +1174,7 @@ class EconomyCog(commands.Cog):
                 description=f"Вы только начали новый цикл работы. Подождите ещё `{seconds_left}` сек., чтобы накопились первые средства.",
                 color=disnake.Color.orange()
             )
-            return await ctx.send(embed=embed)
+            return await ctx.reply(embed=embed)
 
         counted_minutes = min(elapsed_minutes, MAX_MINUTES)
         earned_amount = counted_minutes * RATE_PER_MINUTE
@@ -1203,37 +1207,202 @@ class EconomyCog(commands.Cog):
             color=disnake.Color.green(),
             footer_text="Счетчик накопления перезапущен"
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed)
 
+    # ==========================================
+    #         ГРУППА КОМАНД MONEY (ПРЕФИКСНАЯ)
+    # ==========================================
 
-
-    @commands.command(
-        name="balance",
-        aliases=["bal", "баланс"],
-        description="Посмотреть свой баланс или баланс другого пользователя"
+    @commands.group(
+        name="money",
+        aliases=["деньги"],
+        invoke_without_command=True,
+        description="Управление деньгами"
     )
-    async def balance_second(
-        self, 
-        ctx: commands.Context, 
-        member: disnake.Member = None
-    ):
-        """Префиксная команда проверки баланса (например: !balance @user)."""
-        target = member or ctx.author
+    async def money_group_prefix(self, ctx: commands.Context):
+        """Справка по субкомандам money."""
+        embed = create_embed(
+            title="💰 Команды управления деньгами",
+            description=(
+                f"`{ctx.prefix}money transfer @пользователь сумма` — перевести средства\n"
+                f"`{ctx.prefix}money add @пользователь сумма` — выдать средства (Админ)\n"
+                f"`{ctx.prefix}money remove @пользователь сумма` — снять средства (Админ)"
+            ),
+            color=disnake.Color.blue()
+        )
+        await ctx.reply(embed=embed)
 
-        if not await ensure_user_registered(ctx, target.id):
+    @money_group_prefix.command(
+        name="transfer",
+        aliases=["pay", "перевод"],
+        description="Перевести деньги другому пользователю"
+    )
+    async def transfer_prefix(self, ctx: commands.Context, member: disnake.Member, amount: int):
+        sender_id = ctx.author.id
+        receiver_id = member.id
+
+        if not await ensure_user_registered(ctx, sender_id):
             return
 
-        # Получаем данные из функции БД
-        user_balance = await get_user_info(target.id, "balance") or 0
+        if not await ensure_user_registered(ctx, receiver_id):
+            return
 
-        # Создаем красивый эмбед через utils
-        embed = create_embed(
-            title=f"Баланс: {target.display_name}",
-            description=f"На счету пользователя: `{format_number(user_balance)}` R$.",
+        if sender_id == receiver_id:
+            embed = create_embed(
+                title="❌ Ошибка перевода",
+                description="Вы не можете переводить деньги самому себе.",
+                color=disnake.Color.red()
+            )
+            return await ctx.reply(embed=embed)
+
+        if amount <= 0:
+            embed = create_embed(
+                title="❌ Некорректная сумма",
+                description="Сумма перевода должна быть положительным числом.",
+                color=disnake.Color.red()
+            )
+            return await ctx.reply(embed=embed)
+
+        sender_balance = await get_user_info(sender_id, "balance") or 0
+        if sender_balance < amount:
+            embed = create_embed(
+                title="❌ Недостаточно средств",
+                description=f"У вас недостаточно средств для перевода `{format_number(amount)}` R$.\nВаш текущий баланс: `{format_number(sender_balance)}` R$.",
+                color=disnake.Color.red()
+            )
+            return await ctx.reply(embed=embed)
+
+        new_sender_balance = sender_balance - amount
+        receiver_balance = await get_user_info(receiver_id, "balance") or 0
+        new_receiver_balance = receiver_balance + amount
+
+        await update_user_info(sender_id, "balance", str(new_sender_balance))
+        await update_user_info(receiver_id, "balance", str(new_receiver_balance))
+
+        embed_sender = create_embed(
+            title="✅ Перевод выполнен",
+            description=(
+                f"Вы успешно перевели `{format_number(amount)}` R$ пользователю {member.mention}.\n"
+                f"Ваш новый баланс: `{format_number(new_sender_balance)}` R$."
+            ),
+            color=disnake.Color.green()
+        )
+        embed_receiver = create_embed(
+            title="💸 Вам перевели деньги",
+            description=(
+                f"Вам успешно перевели `{format_number(amount)}` R$ пользователем {ctx.author.mention}.\n"
+                f"Ваш новый баланс: `{format_number(new_receiver_balance)}` R$."
+            ),
             color=disnake.Color.green()
         )
 
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed_sender)
+        try:
+            await member.send(embed=embed_receiver)
+        except disnake.Forbidden:
+            pass
+
+    @money_group_prefix.command(
+        name="add",
+        aliases=["give", "выдать"],
+        description="Выдать деньги пользователю (Админ)"
+    )
+    @commands.has_permissions(administrator=True)
+    async def add_prefix(self, ctx: commands.Context, member: disnake.Member, amount: int):
+        if not await ensure_user_registered(ctx, member.id):
+            return
+
+        if amount <= 0:
+            embed = create_embed(
+                title="❌ Некорректная сумма",
+                description="Сумма выдачи должна быть положительным числом.",
+                color=disnake.Color.red()
+            )
+            return await ctx.reply(embed=embed)
+
+        receiver_id = member.id
+        receiver_balance = await get_user_info(receiver_id, "balance") or 0
+        new_receiver_balance = receiver_balance + amount
+
+        await update_user_info(receiver_id, "balance", str(new_receiver_balance))
+
+        embed_admin = create_embed(
+            title="✅ Средства выданы",
+            description=(
+                f"Вы успешно выдали `{format_number(amount)}` R$ пользователю {member.mention}.\n"
+                f"Новый баланс пользователя: `{format_number(new_receiver_balance)}` R$."
+            ),
+            color=disnake.Color.green()
+        )
+        embed_user = create_embed(
+            title="💰 Вам начислены средства",
+            description=(
+                f"Вам было начислено `{format_number(amount)}` R$ администратором {ctx.author.mention}.\n"
+                f"Ваш новый баланс: `{format_number(new_receiver_balance)}` R$."
+            ),
+            color=disnake.Color.green()
+        )
+
+        await ctx.reply(embed=embed_admin)
+        try:
+            await member.send(embed=embed_user)
+        except disnake.Forbidden:
+            pass
+
+    @money_group_prefix.command(
+        name="remove",
+        aliases=["take", "снять"],
+        description="Снять деньги с пользователя (Админ)"
+    )
+    @commands.has_permissions(administrator=True)
+    async def remove_prefix(self, ctx: commands.Context, member: disnake.Member, amount: int):
+        if not await ensure_user_registered(ctx, member.id):
+            return
+
+        if amount <= 0:
+            embed = create_embed(
+                title="❌ Некорректная сумма",
+                description="Сумма снятия должна быть положительным числом.",
+                color=disnake.Color.red()
+            )
+            return await ctx.reply(embed=embed)
+
+        receiver_id = member.id
+        receiver_balance = await get_user_info(receiver_id, "balance") or 0
+
+        if receiver_balance < amount:
+            embed = create_embed(
+                title="❌ Недостаточно средств",
+                description=f"У пользователя {member.mention} недостаточно средств для снятия `{format_number(amount)}` R$.\nТекущий баланс: `{format_number(receiver_balance)}` R$.",
+                color=disnake.Color.red()
+            )
+            return await ctx.reply(embed=embed)
+
+        new_receiver_balance = receiver_balance - amount
+        await update_user_info(receiver_id, "balance", str(new_receiver_balance))
+
+        embed_admin = create_embed(
+            title="✅ Средства сняты",
+            description=(
+                f"Вы успешно сняли `{format_number(amount)}` R$ с пользователя {member.mention}.\n"
+                f"Новый баланс пользователя: `{format_number(new_receiver_balance)}` R$."
+            ),
+            color=disnake.Color.green()
+        )
+        embed_user = create_embed(
+            title="💸 С вас сняты средства",
+            description=(
+                f"С вашего баланса было снято `{format_number(amount)}` R$ администратором {ctx.author.mention}.\n"
+                f"Ваш новый баланс: `{format_number(new_receiver_balance)}` R$."
+            ),
+            color=disnake.Color.red()
+        )
+
+        await ctx.reply(embed=embed_admin)
+        try:
+            await member.send(embed=embed_user)
+        except disnake.Forbidden:
+            pass
 
 
 
