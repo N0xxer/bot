@@ -1269,6 +1269,7 @@ class BanksCog(commands.Cog):
                     bank_id=bank_id,
                     op_type="deposit",
                     user1_id=inter.author.id,
+                    account1="КАЗНА",  # <-- Добавлен обязательный аргумент
                     amount=amount,
                     extra="Владелец пополнил казну банка из личных средств."
                 )
@@ -1295,6 +1296,7 @@ class BanksCog(commands.Cog):
                     bank_id=bank_id,
                     op_type="withdraw",
                     user1_id=inter.author.id,
+                    account1="КАЗНА",  # <-- Добавлен обязательный аргумент
                     amount=amount,
                     extra="Владелец снял средства из казны банка на руки."
                 )
