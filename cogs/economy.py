@@ -4,6 +4,7 @@ import disnake
 from disnake.ext import commands
 import aiosqlite
 from typing import Optional
+import math
 
 from functions.db_helpers import get_user_info, update_user_info, DB_PATH
 from functions.utils import create_embed, format_number, UniversalModal, ensure_user_registered
@@ -1498,6 +1499,146 @@ class EconomyCog(commands.Cog):
             footer_text=f"Пользователь: {ctx.author.display_name}"
         )
         await ctx.reply(embed=embed)
+
+
+
+    @money.sub_command(
+        name="leaderboard",
+        description="Топ богатейших граждан Республики Резендия"
+    )
+    async def money_leaderboard(self, inter: disnake.ApplicationCommandInteraction):
+        await inter.response.defer()
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT user_id, balance, FIO 
+                FROM users 
+                WHERE FIO IS NOT NULL AND FIO != ''
+                ORDER BY balance DESC
+            """) as cursor:
+                rows = await cursor.fetchall()
+                users_data = [dict(row) for row in rows]
+
+        if not users_data:
+            embed = create_embed(
+                title="🏆 Таблица лидеров",
+                description="В государственной базе пока нет зарегистрированных граждан.",
+                color=disnake.Color.orange()
+            )
+            return await inter.edit_original_message(embed=embed)
+
+        embed, view = self._build_leaderboard_page(users_data, page=0, author_id=inter.author.id)
+        await inter.edit_original_message(embed=embed, view=view)
+
+    @money_group_prefix.command(
+        name="leaderboard",
+        aliases=["top", "топ", "lb", "лидеры"],
+        description="Топ богатейших граждан Республики"
+    )
+    async def money_leaderboard_prefix(self, ctx: commands.Context):
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT user_id, balance, FIO 
+                FROM users 
+                WHERE FIO IS NOT NULL AND FIO != ''
+                ORDER BY balance DESC
+            """) as cursor:
+                rows = await cursor.fetchall()
+                users_data = [dict(row) for row in rows]
+
+        if not users_data:
+            embed = create_embed(
+                title="🏆 Таблица лидеров",
+                description="В государственной базе пока нет зарегистрированных граждан.",
+                color=disnake.Color.orange()
+            )
+            return await ctx.reply(embed=embed)
+
+        embed, view = self._build_leaderboard_page(users_data, page=0, author_id=ctx.author.id)
+        await ctx.reply(embed=embed, view=view)
+
+    def _build_leaderboard_page(self, users_data: list, page: int, author_id: int, per_page: int = 10):
+        total_pages = max(1, (len(users_data) + per_page - 1) // per_page)
+        start_idx = page * per_page
+        end_idx = start_idx + per_page
+        page_users = users_data[start_idx:end_idx]
+
+        medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+        lines = []
+
+        for idx, user in enumerate(page_users, start=start_idx + 1):
+            rank_icon = medals.get(idx - 1, f"`#{idx}`")
+            fio = user["FIO"] if user["FIO"] else "Гражданин"
+            balance = user["balance"] or 0
+            lines.append(
+                f"{rank_icon} **{fio}** (<@{user['user_id']}>)\n"
+                f"└ Баланс: `{format_number(balance)}` R$"
+            )
+
+        embed = create_embed(
+            title="🏆 Таблица лидеров по богатству",
+            description="\n\n".join(lines) if lines else "Список граждан пуст.",
+            color=disnake.Color.gold(),
+            footer_text=f"Всего граждан: {len(users_data)}"
+        )
+
+        view = disnake.ui.View(timeout=180)
+        view.add_item(
+            disnake.ui.Button(
+                label="◀ Назад",
+                style=disnake.ButtonStyle.secondary,
+                disabled=(page == 0),
+                custom_id=f"lb_nav:{author_id}:{page - 1}"
+            )
+        )
+        view.add_item(
+            disnake.ui.Button(
+                label=f"{page + 1} / {total_pages}",
+                style=disnake.ButtonStyle.primary,
+                disabled=True
+            )
+        )
+        view.add_item(
+            disnake.ui.Button(
+                label="Вперед ▶",
+                style=disnake.ButtonStyle.secondary,
+                disabled=(page >= total_pages - 1),
+                custom_id=f"lb_nav:{author_id}:{page + 1}"
+            )
+        )
+
+        return embed, view
+
+    @commands.Cog.listener("on_button_click")
+    async def handle_leaderboard_navigation(self, inter: disnake.MessageInteraction):
+        if not inter.component.custom_id.startswith("lb_nav:"):
+            return
+
+        _, author_id_str, target_page_str = inter.component.custom_id.split(":")
+        author_id = int(author_id_str)
+        target_page = int(target_page_str)
+
+        if inter.author.id != author_id:
+            return await inter.response.send_message(
+                "❌ Только инициатор команды может переключать страницы.",
+                ephemeral=True
+            )
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT user_id, balance, FIO 
+                FROM users 
+                WHERE FIO IS NOT NULL AND FIO != ''
+                ORDER BY balance DESC
+            """) as cursor:
+                rows = await cursor.fetchall()
+                users_data = [dict(row) for row in rows]
+
+        embed, view = self._build_leaderboard_page(users_data, page=target_page, author_id=author_id)
+        await inter.response.edit_message(embed=embed, view=view)
 
 
 
