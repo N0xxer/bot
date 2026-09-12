@@ -5,11 +5,13 @@ from functions.db_helpers import is_user_registered
 from disnake.ext import commands
 
 
+MAIN_COLOR = disnake.Color(0x00A5FE)
+
 
 def create_embed(
     title: str, 
     description: str = None, 
-    color: disnake.Color = disnake.Color.blue(),
+    color: disnake.Color = MAIN_COLOR,
     footer_text: str = None
 ) -> disnake.Embed:
     """Универсальная функция для создания красивых Embed-сообщений."""

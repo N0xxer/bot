@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Optional
 import disnake
@@ -21,7 +22,7 @@ from functions.db_helpers import (
     update_user_info,
     is_user_registered
 )
-from functions.utils import ensure_user_registered, notification_send, create_embed, format_number
+from functions.utils import ensure_user_registered, notification_send, create_embed, format_number, MAIN_COLOR
 
 
 class BanksCog(commands.Cog):
@@ -259,7 +260,6 @@ class BanksCog(commands.Cog):
     async def bank_group(self, inter: disnake.ApplicationCommandInteraction):
         pass
 
-    # --- Создание банка ---
     @bank_group.sub_command(
         name="create",
         description="Зарегистрировать новый банк (Администрация)"
@@ -277,6 +277,10 @@ class BanksCog(commands.Cog):
         владелец: Optional[disnake.Member] = commands.Param(
             default=None,
             description="Владелец банка (по умолчанию: Федеральное управление)"
+        ),
+        создавать_форум: bool = commands.Param(
+            default=True,
+            description="Создавать ли публичный форум банка для работы с клиентами?"
         )
     ):
         await inter.response.defer(ephemeral=True)
@@ -290,29 +294,71 @@ class BanksCog(commands.Cog):
 
         owner_id = владелец.id if владелец else None
 
-        overwrites = {
+        # Права для служебных каналов (управление и логи)
+        admin_overwrites = {
             inter.guild.default_role: disnake.PermissionOverwrite(view_channel=False),
             inter.guild.me: disnake.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
         }
         if владелец:
-            overwrites[владелец] = disnake.PermissionOverwrite(view_channel=True, send_messages=False)
+            admin_overwrites[владелец] = disnake.PermissionOverwrite(view_channel=True, send_messages=False)
 
         clean_name = название.lower().replace(" ", "-")[:25]
+
         control_channel = await category.create_text_channel(
             name=f"банк-{clean_name}",
-            overwrites=overwrites,
+            overwrites=admin_overwrites,
             topic=f"Панель управления банком {название}"
         )
         log_channel = await category.create_text_channel(
             name=f"логи-{clean_name}",
-            overwrites=overwrites,
+            overwrites=admin_overwrites,
             topic=f"Логи операций банка {название}"
         )
+
+        # Создание публичного форума банка по аналогии с компаниями
+        forum_channel = None
+        if создавать_форум:
+            forum_overwrites = {
+                inter.guild.default_role: disnake.PermissionOverwrite(
+                    view_channel=True,
+                    read_message_history=True,
+                    create_public_threads=False,
+                    create_private_threads=False,
+                    send_messages_in_threads=False,
+                    send_messages=False
+                ),
+                inter.guild.me: disnake.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    manage_channels=True,
+                    manage_threads=True
+                )
+            }
+            if владелец:
+                forum_overwrites[владелец] = disnake.PermissionOverwrite(
+                    view_channel=True,
+                    read_message_history=True,
+                    create_public_threads=True,
+                    send_messages_in_threads=True,
+                    send_messages=True
+                )
+
+            owner_label = владелец.display_name if владелец else "Федеральное управление"
+            try:
+                forum_channel = await category.create_forum_channel(
+                    name=f"❮🏛️❯・{название}",
+                    overwrites=forum_overwrites,
+                    topic=f"Филиал банка «{название}». Руководство: {owner_label} | Тип: {тип}"
+                )
+            except Exception as e:
+                return await inter.edit_original_message(content=f"❌ Не удалось создать форум банка: `{e}`")
 
         try:
             bottom_pos = max((c.position for c in category.channels), default=0) + 1
             await control_channel.edit(position=bottom_pos)
             await log_channel.edit(position=bottom_pos + 1)
+            if forum_channel:
+                await forum_channel.edit(position=bottom_pos + 2)
         except Exception:
             pass
 
@@ -332,16 +378,21 @@ class BanksCog(commands.Cog):
             await db.commit()
 
         owner_str = владелец.mention if владелец else "Федеральное управление"
+        forum_info = f"\nФорум банка: {forum_channel.mention}" if forum_channel else ""
+
         await notification_send(
             inter,
             title="🏛️ Зарегистрирован новый банк",
-            description=f"Банк **«{название}»** ({тип}) успешно создан.\nВладелец: {owner_str}\nКанал: {control_channel.mention}",
+            description=f"Банк **«{название}»** ({тип}) успешно создан.\nВладелец: {owner_str}\nУправление: {control_channel.mention}{forum_info}",
             color=disnake.Color.green()
         )
 
-        await inter.edit_original_message(content=f"✅ Банк **«{название}»** успешно создан! Каналы: {control_channel.mention} и {log_channel.mention}.")
+        await inter.edit_original_message(
+            content=f"✅ Банк **«{название}»** успешно создан!\n• Панель: {control_channel.mention}\n• Логи: {log_channel.mention}" + (f"\n• Форум: {forum_channel.mention}" if forum_channel else "")
+        )
 
-    # --- Роспуск банка ---
+
+
     @bank_group.sub_command(
         name="dissolution",
         description="Полный роспуск банка (Администрация)"
@@ -574,7 +625,8 @@ class BanksCog(commands.Cog):
         )
         await inter.edit_original_message(embed=embed)
 
-    # --- Панель услуг банка ---
+
+
     @commands.slash_command(
         name="send_bank_services_panel",
         description="Отправить панель услуг банка (Администрация)",
@@ -582,6 +634,14 @@ class BanksCog(commands.Cog):
     )
     async def send_services_panel(self, inter: disnake.ApplicationCommandInteraction):
         await inter.response.defer(ephemeral=True)
+
+        image_path = os.path.join("images", "banki.png")
+        if not os.path.exists(image_path):
+            return await inter.edit_original_message(
+                content=f"❌ Файл `{image_path}` не найден."
+            )
+
+        file = disnake.File(image_path, filename="banki.png")
 
         content = (
             "### 🏛️ Банковские услуги Резендии\n\n"
@@ -591,7 +651,11 @@ class BanksCog(commands.Cog):
         )
 
         components = [
-            disnake.ui.Container(disnake.ui.TextDisplay(content=content)),
+            disnake.ui.Container(
+                disnake.ui.TextDisplay(content=content),
+                disnake.ui.MediaGallery(disnake.MediaGalleryItem(media="attachment://banki.png")),
+                accent_color=MAIN_COLOR
+            ),
             disnake.ui.ActionRow(
                 disnake.ui.Button(
                     label="Открыть лицевой счет",
@@ -607,16 +671,9 @@ class BanksCog(commands.Cog):
                 )
             )
         ]
-        await inter.channel.send(components=components)
-        await inter.edit_original_message(content="✅ Панель банковских услуг отправлена.")\
 
-
-
-#    @bank_group.sub_command(
-#        name="credit",
-#        description="Просмотр своих кредитов",
-#
-#    )
+        await inter.channel.send(file=file, components=components)
+        await inter.edit_original_message(content="✅ Панель банковских услуг отправлена.")
 
 
 
@@ -1041,10 +1098,11 @@ class BanksCog(commands.Cog):
 
 
 
-
     # =========================================================
     #                   СИСТЕМА КРЕДИТОВАНИЯ
     # =========================================================
+
+
 
     @commands.slash_command(name="credit", description="Управление кредитами и выплатами")
     async def credit_group(self, inter: disnake.ApplicationCommandInteraction):
