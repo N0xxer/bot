@@ -550,7 +550,13 @@ class PoliticsCog(commands.Cog):
     async def send_proposal_panel(self, inter: disnake.ApplicationCommandInteraction):
         await inter.response.defer(ephemeral=True)
 
-        banner_url = "https://media.discordapp.net/attachments/1121508735685234798/1541046906916962364/Picsart_26-08-12_11-18-48-461.png?ex=6a960e85&is=6a94bd05&hm=34014ca7b9fa6544cfa74fc5d9bc831cb45ebdae3a53cfe5883cf64dc9da4275&format=webp&quality=lossless&width=2048&height=683&"
+        image_path = os.path.join("images", "zakonoproekt.png")
+        if not os.path.exists(image_path):
+            return await inter.edit_original_message(
+                content=f"❌ Файл `{image_path}` не найден."
+            )
+
+        file = disnake.File(image_path, filename="zakonoproekt.png")
 
         container_body = [
             disnake.ui.TextDisplay(
@@ -566,7 +572,7 @@ class PoliticsCog(commands.Cog):
                     "4. Ваше пояснение текста закона (по желанию)"
                 )
             ),
-            disnake.ui.MediaGallery(disnake.MediaGalleryItem(media=banner_url))
+            disnake.ui.MediaGallery(disnake.MediaGalleryItem(media="attachment://zakonoproekt.png"))
         ]
 
         components = [
@@ -581,7 +587,7 @@ class PoliticsCog(commands.Cog):
             )
         ]
 
-        await inter.channel.send(components=components)
+        await inter.channel.send(file=file, components=components)
         await inter.edit_original_message(content="✅ Панель подачи успешно отправлена.")
 
     # =========================================================
