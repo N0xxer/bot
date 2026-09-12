@@ -423,7 +423,7 @@ class CompaniesCog(commands.Cog):
         await inter.response.defer(ephemeral=True)
 
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT name, owner_id, channel_id FROM companies WHERE id = ?;", (компания,)) as cursor:
+            async with db.execute("SELECT name, owner_id, forum_id FROM companies WHERE id = ?;", (компания,)) as cursor:
                 company_row = await cursor.fetchone()
 
             if not company_row:
@@ -434,14 +434,14 @@ class CompaniesCog(commands.Cog):
                 )
                 return await inter.edit_original_message(embed=embed)
 
-            comp_name, owner_id, old_channel_id = company_row
+            comp_name, owner_id, old_forum_id = company_row
 
-            # Обновляем channel_id
-            await db.execute("UPDATE companies SET channel_id = ? WHERE id = ?;", (новый_канал.id, компания))
+            # Обновляем forum_id
+            await db.execute("UPDATE companies SET forum_id = ? WHERE id = ?;", (новый_канал.id, компания))
             await db.commit()
 
-        old_channel = inter.guild.get_channel(old_channel_id) if old_channel_id else None
-        old_channel_str = old_channel.mention if old_channel else "`Отсутствовал`"
+        old_forum = inter.guild.get_channel(old_forum_id) if old_forum_id else None
+        old_forum_str = old_forum.mention if old_forum else "`Отсутствовал`"
 
         embed = create_embed(
             title="🏢 Канал компании обновлен",
@@ -449,8 +449,8 @@ class CompaniesCog(commands.Cog):
                 f"**ID компании:** `{компания}`\n"
                 f"**Организация:** «{comp_name}»\n"
                 f"**Владелец:** <@{owner_id}>\n\n"
-                f"**Предыдущий канал:** {old_channel_str}\n"
-                f"**Новый канал:** {новый_канал.mention}"
+                f"**Предыдущий форум:** {old_forum_str}\n"
+                f"**Новый форум:** {новый_канал.mention}"
             ),
             color=disnake.Color.green()
         )
