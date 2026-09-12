@@ -1,7 +1,6 @@
 import disnake
 from typing import Callable, List, Awaitable, Union
 
-from matplotlib.pyplot import title
 from functions.db_helpers import is_user_registered
 from disnake.ext import commands
 
