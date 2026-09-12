@@ -282,6 +282,7 @@ class BanksCog(commands.Cog):
     async def bank_group(self, inter: disnake.ApplicationCommandInteraction):
         pass
 
+
     @bank_group.sub_command(
         name="create",
         description="Зарегистрировать новый банк (Администрация)"
@@ -469,7 +470,7 @@ class BanksCog(commands.Cog):
         )
         await inter.edit_original_message(content=f"✅ Банк **«{название}»** успешно распущен.")
 
-    # --- Просмотр счетов ---
+
     @bank_group.sub_command(name="accounts", description="Посмотреть банковские счета")
     async def bank_accounts_view(
         self,
@@ -499,7 +500,7 @@ class BanksCog(commands.Cog):
 
         await inter.edit_original_message(content="\n".join(lines))
 
-    # --- Пополнение (Deposit) ---
+
     @bank_group.sub_command(name="deposit", description="Внести наличные на лицевой счет")
     async def bank_deposit(
         self,
@@ -541,7 +542,7 @@ class BanksCog(commands.Cog):
         )
         await inter.edit_original_message(embed=embed)
 
-    # --- Снятие (Withdraw) ---
+
     @bank_group.sub_command(name="withdraw", description="Снять наличные с лицевого счета")
     async def bank_withdraw(
         self,
@@ -582,7 +583,7 @@ class BanksCog(commands.Cog):
         )
         await inter.edit_original_message(embed=embed)
 
-    # --- Перевод (Transfer) ---
+
     @bank_group.sub_command(name="transfer", description="Перевод средств между лицевыми счетами")
     async def bank_transfer(
         self,
@@ -1075,110 +1076,60 @@ class BanksCog(commands.Cog):
     @commands.Cog.listener("on_button_click")
     async def handle_bank_control_buttons(self, inter: disnake.MessageInteraction):
         custom_id = inter.component.custom_id
-        if not custom_id.startswith("bank_btn:"):
+
+        # Обрабатываем только кнопки панели управления банком
+        if not custom_id.startswith("bank_ctrl:"):
             return
 
-        _, action, bank_id_str = custom_id.split(":")
-        bank_id = int(bank_id_str)
+        parts = custom_id.split(":")
+        action = parts[1]
+        bank_id = int(parts[2])
+
         bank = await get_bank(bank_id)
         if not bank:
-            return await inter.response.send_message("❌ Банк не найден.", ephemeral=True, delete_after=10)
+            return await inter.response.send_message("❌ Данные банка не найдены в базе.", ephemeral=True)
 
         is_owner = (bank["owner_id"] == inter.author.id)
         is_admin = inter.author.guild_permissions.administrator
+
+        # Доступ к управлению имеют только владелец банка или администраторы
         if not (is_owner or is_admin):
-            return await inter.response.send_message("⛔ Доступ к управлению банком запрещен.", ephemeral=True, delete_after=10)
+            return await inter.response.send_message("⛔ Только владелец банка или администратор может использовать эту панель.", ephemeral=True)
 
-        if action == "refresh":
-            components = await self.build_bank_control_components(bank_id)
-            await inter.response.edit_message(components=components)
-
-        elif action == "edit":
-            modal_components = [
-                disnake.ui.Label(
-                    text="Новое название банка",
-                    component=disnake.ui.TextInput(
-                        custom_id="new_name",
-                        placeholder="Оставьте пустым, если без изменений",
-                        style=disnake.TextInputStyle.short,
-                        required=False
-                    )
-                ),
-                disnake.ui.Label(
-                    text="Новый владелец банка",
-                    component=disnake.ui.UserSelect(
-                        custom_id="new_owner",
-                        placeholder="Выберите пользователя (необязательно)",
-                        min_values=0,
-                        max_values=1,
-                        required=False
-                    )
-                ),
-                disnake.ui.Label(
-                    text="Новая процентная ставка (%)",
-                    component=disnake.ui.TextInput(
-                        custom_id="new_rate",
-                        placeholder="Например: 6.5",
-                        style=disnake.TextInputStyle.short,
-                        required=False
-                    )
-                )
-            ]
-            await inter.response.send_modal(
+        # 1. Изменение данных банка (Название, Владелец, Ставка)
+        if action == "edit":
+            modal = disnake.ui.Modal(
                 title=f"Настройки: {bank['name'][:30]}",
                 custom_id=f"modal:bank_edit:{bank_id}",
-                components=modal_components
-            )
-
-        elif action == "freeze":
-            accounts = await get_bank_accounts(bank_id)
-            if not accounts:
-                return await inter.response.send_message("В вашем банке еще нет открытых счетов.", ephemeral=True, delete_after=10)
-
-            select_options = []
-            for acc in accounts[:25]:
-                status_mark = "🔒 " if acc["is_frozen"] else "🟢 "
-                fio_str = f" | {acc['FIO']}" if acc["FIO"] else ""
-                select_options.append(
-                    disnake.SelectOption(
-                        label=f"{status_mark}{acc['account_number']}{fio_str}"[:100],
-                        value=acc["account_number"],
-                        description=f"Баланс: {format_number(acc['balance'])} R$ | Заморожен: {'Да' if acc['is_frozen'] else 'Нет'}"
+                components=[
+                    disnake.ui.TextInput(
+                        label="Новое название банка",
+                        placeholder=bank["name"],
+                        custom_id="new_name",
+                        style=disnake.TextInputStyle.short,
+                        required=False,
+                        max_length=100
+                    ),
+                    disnake.ui.TextInput(
+                        label="Процентная ставка (%)",
+                        placeholder=str(bank["interest_rate"]),
+                        custom_id="new_rate",
+                        style=disnake.TextInputStyle.short,
+                        required=False,
+                        max_length=5
                     )
-                )
-
-            view = disnake.ui.View(timeout=30)
-            view.add_item(
-                disnake.ui.StringSelect(
-                    custom_id=f"select_freeze_acc:{bank_id}",
-                    placeholder="Выберите счет для заморозки/разморозки",
-                    options=select_options
-                )
+                ]
             )
-            await inter.response.send_message(
-                "Выберите лицевой счет для изменения статуса активности:",
-                view=view,
-                ephemeral=True,
-                delete_after=30
-            )
+            await inter.response.send_modal(modal=modal)
 
-        elif custom_id.startswith("bank_ctrl:balance:"):
-            bank_id = int(custom_id.split(":")[2])
-            bank = await get_bank(bank_id)
-            if not bank:
-                return await inter.response.send_message("❌ Банк не найден.", ephemeral=True)
-
-            is_owner = (bank["owner_id"] == inter.author.id)
-            is_admin = inter.author.guild_permissions.administrator
-            if not (is_owner or is_admin):
-                return await inter.response.send_message("⛔ Только владелец банка может управлять его казной.", ephemeral=True)
-
+        # 2. Управление казной (Внесение / Снятие денег владельцем)
+        elif action == "balance":
             modal = disnake.ui.Modal(
                 title=f"Казна: {bank['name'][:35]}",
                 custom_id=f"bank_modal:balance:{bank_id}",
                 components=[
                     disnake.ui.TextInput(
-                        label="Действие (+ для взноса / - для снятия)",
+                        label="Действие (+ пополнить / - снять)",
                         placeholder="Напишите: пополнить ИЛИ снять",
                         custom_id="action_type",
                         style=disnake.TextInputStyle.short,
@@ -1195,6 +1146,47 @@ class BanksCog(commands.Cog):
                 ]
             )
             await inter.response.send_modal(modal=modal)
+
+        # 3. Заморозка / Разморозка счетов клиентов банка
+        elif action == "freeze":
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT account_number, user_id, balance, is_frozen FROM bank_accounts WHERE bank_id = ? LIMIT 25",
+                    (bank_id,)
+                ) as cursor:
+                    accounts = await cursor.fetchall()
+
+            if not accounts:
+                return await inter.response.send_message("ℹ️ В этом банке пока не открыто ни одного лицевого счета.", ephemeral=True)
+
+            options = [
+                disnake.SelectOption(
+                    label=f"Счет {acc['account_number']} ({'🔒 Заморожен' if acc['is_frozen'] else '🟢 Активен'})",
+                    value=acc["account_number"],
+                    description=f"Баланс: {format_number(acc['balance'])} R$ | Владелец: {acc['user_id']}"[:100]
+                )
+                for acc in accounts
+            ]
+
+            view = disnake.ui.View(timeout=60)
+            select = disnake.ui.StringSelect(
+                custom_id=f"bank_freeze_select:{bank_id}",
+                placeholder="Выберите лицевой счет для переключения статуса",
+                options=options
+            )
+            view.add_item(select)
+            await inter.response.send_message("Выберите счет клиента для заморозки или разблокировки:", view=view, ephemeral=True)
+
+        # 4. Обновление карточки
+        elif action == "refresh":
+            await inter.response.defer()
+            comps = await self.build_bank_control_components(bank_id)
+            try:
+                await inter.edit_original_message(components=comps)
+            except Exception:
+                # Если кнопка была нажата на самом сообщении канала
+                await inter.message.edit(components=comps)
 
 
     @commands.Cog.listener("on_modal_submit")
@@ -1329,34 +1321,26 @@ class BanksCog(commands.Cog):
 
 
     @commands.Cog.listener("on_dropdown")
-    async def handle_freeze_select(self, inter: disnake.MessageInteraction):
-        if not inter.component.custom_id.startswith("select_freeze_acc:"):
+    async def handle_bank_dropdowns(self, inter: disnake.MessageInteraction):
+        if not inter.component.custom_id.startswith("bank_freeze_select:"):
             return
 
         bank_id = int(inter.component.custom_id.split(":")[1])
-        acc_number = inter.values[0]
-        account = await get_account_by_number(acc_number)
-        if not account:
-            return await inter.response.send_message("❌ Счет не найден.", ephemeral=True, delete_after=10)
+        acc_num = inter.values[0]
 
-        new_status = not bool(account["is_frozen"])
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE bank_accounts SET is_frozen = ? WHERE account_number = ?", (int(new_status), acc_number))
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT is_frozen FROM bank_accounts WHERE account_number = ?", (acc_num,)) as cur:
+                row = await cur.fetchone()
+                if not row:
+                    return await inter.response.edit_message(content="❌ Счет не найден.", view=None)
+
+            new_status = 0 if row["is_frozen"] else 1
+            await db.execute("UPDATE bank_accounts SET is_frozen = ? WHERE account_number = ?", (new_status, acc_num))
             await db.commit()
 
-        status_word = "заморожен 🔒" if new_status else "разморожен 🟢"
-        await self.bank_money_logger(
-            bank_id=bank_id,
-            op_type="freeze" if new_status else "unfreeze",
-            user1_id=account["user_id"],
-            account1=acc_number
-        )
-
-        await inter.response.send_message(
-            f"✅ Счет `{acc_number}` был успешно {status_word}.",
-            ephemeral=True,
-            delete_after=10
-        )
+        status_label = "заморожен 🔒" if new_status else "разблокирован 🟢"
+        await inter.response.edit_message(content=f"✅ Лицевой счет `{acc_num}` теперь **{status_label}**.", view=None)
 
 
 
