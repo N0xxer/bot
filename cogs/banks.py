@@ -22,7 +22,7 @@ from functions.db_helpers import (
     update_user_info,
     is_user_registered
 )
-from functions.utils import ensure_user_registered, notification_send, create_embed, format_number, MAIN_COLOR
+from functions.utils import ensure_admin, ensure_user_registered, notification_send, create_embed, format_number, MAIN_COLOR
 
 
 class BanksCog(commands.Cog):
@@ -200,21 +200,29 @@ class BanksCog(commands.Cog):
             pass
 
     async def build_bank_control_components(self, bank_id: int):
-        """Формирует карточку управления банком и кнопки под ней."""
         bank = await get_bank(bank_id)
         if not bank:
-            return None
+            return []
 
-        total_loans = await get_bank_total_issued_loans(bank_id)
         owner_text = f"<@{bank['owner_id']}>" if bank["owner_id"] else "Федеральное управление"
+        
+        # Считаем сумму активных кредитов банка
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT SUM(remaining_debt) FROM bank_loans WHERE bank_id = ? AND is_closed = 0",
+                (bank_id,)
+            ) as cursor:
+                active_loans_row = await cursor.fetchone()
+                active_loans_total = active_loans_row[0] or 0
 
         content = (
-            f"## Управление банком: {bank['name']}\n\n"
-            f"🏛️ **Тип:** `{bank['type'].capitalize()}`\n"
-            f"👑 **Владелец:** {owner_text}\n"
-            f"💰 **Баланс банка:** `{format_number(bank['balance'])}` R$\n"
-            f"📊 **Выдано кредитов на:** `{format_number(total_loans)}` R$\n"
-            f"📈 **Процентная ставка:** `{bank['interest_rate']}%`"
+            f"### 🏛️ Панель управления банком «{bank['name']}»\n\n"
+            f"• **ID банка:** `{bank['id']}`\n"
+            f"• **Тип:** `{bank['type']}`\n"
+            f"• **Владелец:** {owner_text}\n"
+            f"• **Казна (Резерв):** `{format_number(bank['balance'])}` R$\n"
+            f"• **Кредитная ставка:** `{bank['interest_rate']}%`\n"
+            f"• **Активные выданные займы:** `{format_number(active_loans_total)}` R$\n"
         )
 
         return [
@@ -222,21 +230,27 @@ class BanksCog(commands.Cog):
             disnake.ui.ActionRow(
                 disnake.ui.Button(
                     label="Изменить данные",
-                    style=disnake.ButtonStyle.secondary,
                     emoji="⚙️",
-                    custom_id=f"bank_btn:edit:{bank_id}"
+                    style=disnake.ButtonStyle.secondary,
+                    custom_id=f"bank_ctrl:edit:{bank_id}"
                 ),
                 disnake.ui.Button(
-                    label="Заморозить/разморозить счет",
-                    style=disnake.ButtonStyle.primary,
+                    label="Счета клиентов",
                     emoji="🔒",
-                    custom_id=f"bank_btn:freeze:{bank_id}"
+                    style=disnake.ButtonStyle.secondary,
+                    custom_id=f"bank_ctrl:freeze:{bank_id}"
+                ),
+                disnake.ui.Button(
+                    label="Казна банка",
+                    emoji="💰",
+                    style=disnake.ButtonStyle.success,
+                    custom_id=f"bank_ctrl:balance:{bank_id}"
                 ),
                 disnake.ui.Button(
                     label="Обновить",
-                    style=disnake.ButtonStyle.success,
                     emoji="🔄",
-                    custom_id=f"bank_btn:refresh:{bank_id}"
+                    style=disnake.ButtonStyle.primary,
+                    custom_id=f"bank_ctrl:refresh:{bank_id}"
                 )
             )
         ]
@@ -246,6 +260,14 @@ class BanksCog(commands.Cog):
         return {
             f"{acc['bank_name']} | {acc['account_number']} ({format_number(acc['balance'])} R$)": acc['account_number']
             for acc in accounts if user_input.lower() in acc['account_number'].lower() or user_input.lower() in acc['bank_name'].lower()
+        }
+
+
+    async def bank_autocomplete(self, inter: disnake.ApplicationCommandInteraction, user_input: str):
+        banks = await get_all_banks()
+        return {
+            f"{b['name']} (Резерв: {format_number(b['balance'])} R$)": str(b['id'])
+            for b in banks if user_input.lower() in b["name"].lower() or user_input in str(b["id"])
         }
 
 
@@ -677,6 +699,124 @@ class BanksCog(commands.Cog):
 
 
 
+    @bank_group.sub_command_group(name="money", description="Административное управление казной банков")
+    async def bank_money_group(self, inter: disnake.ApplicationCommandInteraction):
+        pass
+
+    # Выдача денег банку (Админ)
+    @bank_money_group.sub_command(
+        name="add",
+        description="Выдать деньги в казну банка (Администрация)"
+    )
+    async def bank_money_add(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        банк: str = commands.Param(description="Выберите банк", autocomplete=bank_autocomplete),
+        количество: int = commands.Param(description="Сумма пополнения", min_value=1)
+    ):
+        if not await ensure_admin(inter):
+            return
+
+        await inter.response.defer(ephemeral=True)
+        bank_id = int(банк)
+        bank = await get_bank(bank_id)
+        if not bank:
+            return await inter.edit_original_message(content="❌ Указанный банк не найден.")
+
+        new_balance = bank["balance"] + количество
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE banks SET balance = ? WHERE id = ?", (new_balance, bank_id))
+            await db.commit()
+
+        await self.bank_money_logger(
+            bank_id=bank_id,
+            op_type="deposit",
+            user1_id=inter.author.id,
+            amount=количество,
+            extra=f"Администратор {inter.author.display_name} эмитировал средства в резерв банка."
+        )
+
+        # Обновляем панель управления банком
+        components = await self.build_bank_control_components(bank_id)
+        channel = self.bot.get_channel(bank["control_channel_id"])
+        if channel and bank["control_message_id"]:
+            try:
+                msg = await channel.fetch_message(bank["control_message_id"])
+                await msg.edit(components=components)
+            except Exception:
+                pass
+
+        embed = create_embed(
+            title="🏛️ Казна банка пополнена",
+            description=(
+                f"**Банк:** «{bank['name']}» (ID: `{bank_id}`)\n"
+                f"**Сумма начисления:** `+{format_number(количество)}` R$\n"
+                f"**Новый резерв банка:** `{format_number(new_balance)}` R$\n"
+                f"**Администратор:** {inter.author.mention}"
+            ),
+            color=disnake.Color.green()
+        )
+        await inter.edit_original_message(embed=embed)
+
+    # Снятие денег с банка (Админ)
+    @bank_money_group.sub_command(
+        name="remove",
+        description="Снять деньги из казны банка (Администрация)"
+    )
+    async def bank_money_remove(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        банк: str = commands.Param(description="Выберите банк", autocomplete=bank_autocomplete),
+        количество: int = commands.Param(description="Сумма списания", min_value=1)
+    ):
+        if not await ensure_admin(inter):
+            return
+
+        await inter.response.defer(ephemeral=True)
+        bank_id = int(банк)
+        bank = await get_bank(bank_id)
+        if not bank:
+            return await inter.edit_original_message(content="❌ Указанный банк не найден.")
+
+        new_balance = bank["balance"] - количество
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE banks SET balance = ? WHERE id = ?", (new_balance, bank_id))
+            await db.commit()
+
+        await self.bank_money_logger(
+            bank_id=bank_id,
+            op_type="withdraw",
+            user1_id=inter.author.id,
+            amount=количество,
+            extra=f"Администратор {inter.author.display_name} списал средства из резерва банка."
+        )
+
+        # Обновляем панель управления банком
+        components = await self.build_bank_control_components(bank_id)
+        channel = self.bot.get_channel(bank["control_channel_id"])
+        if channel and bank["control_message_id"]:
+            try:
+                msg = await channel.fetch_message(bank["control_message_id"])
+                await msg.edit(components=components)
+            except Exception:
+                pass
+
+        embed = create_embed(
+            title="🏛️ Списание из казны банка",
+            description=(
+                f"**Банк:** «{bank['name']}» (ID: `{bank_id}`)\n"
+                f"**Сумма списания:** `-{format_number(количество)}` R$\n"
+                f"**Остаток в казне:** `{format_number(new_balance)}` R$\n"
+                f"**Администратор:** {inter.author.mention}"
+            ),
+            color=disnake.Color.red()
+        )
+        await inter.edit_original_message(embed=embed)
+
+
+
     # =========================================================
     #                   КНОПКИ ПАНЕЛИ УСЛУГ
     # =========================================================
@@ -924,6 +1064,8 @@ class BanksCog(commands.Cog):
 
 
 
+
+
     # =========================================================
     #            ПАНЕЛЬ УПРАВЛЕНИЯ БАНКОМ (ДЛЯ ВЛАДЕЛЬЦА)
     # =========================================================
@@ -1020,51 +1162,171 @@ class BanksCog(commands.Cog):
                 delete_after=30
             )
 
+        elif custom_id.startswith("bank_ctrl:balance:"):
+            bank_id = int(custom_id.split(":")[2])
+            bank = await get_bank(bank_id)
+            if not bank:
+                return await inter.response.send_message("❌ Банк не найден.", ephemeral=True)
+
+            is_owner = (bank["owner_id"] == inter.author.id)
+            is_admin = inter.author.guild_permissions.administrator
+            if not (is_owner or is_admin):
+                return await inter.response.send_message("⛔ Только владелец банка может управлять его казной.", ephemeral=True)
+
+            modal = disnake.ui.Modal(
+                title=f"Казна: {bank['name'][:35]}",
+                custom_id=f"bank_modal:balance:{bank_id}",
+                components=[
+                    disnake.ui.TextInput(
+                        label="Действие (+ для взноса / - для снятия)",
+                        placeholder="Напишите: пополнить ИЛИ снять",
+                        custom_id="action_type",
+                        style=disnake.TextInputStyle.short,
+                        max_length=15,
+                        required=True
+                    ),
+                    disnake.ui.TextInput(
+                        label="Сумма (R$)",
+                        placeholder="Например: 50000",
+                        custom_id="amount",
+                        style=disnake.TextInputStyle.short,
+                        required=True
+                    )
+                ]
+            )
+            await inter.response.send_modal(modal=modal)
+
+
     @commands.Cog.listener("on_modal_submit")
-    async def handle_bank_edit_modal(self, inter: disnake.ModalInteraction):
-        if not inter.custom_id.startswith("modal:bank_edit:"):
-            return
+    async def handle_bank_modals(self, inter: disnake.ModalInteraction):
+        custom_id = inter.custom_id
 
-        bank_id = int(inter.custom_id.split(":")[2])
-        new_name = inter.text_values.get("new_name", "").strip()
-        new_rate_raw = inter.text_values.get("new_rate", "").strip()
+        # 1. Редактирование параметров банка
+        if custom_id.startswith("modal:bank_edit:"):
+            bank_id = int(custom_id.split(":")[2])
+            new_name = inter.text_values.get("new_name", "").strip()
+            new_rate_raw = inter.text_values.get("new_rate", "").strip()
 
-        selected_owners = inter.values.get("new_owner", [])
-        new_owner_id = int(selected_owners[0]) if selected_owners else None
+            selected_owners = inter.values.get("new_owner", [])
+            new_owner_id = int(selected_owners[0]) if selected_owners else None
 
-        changes = []
-        async with aiosqlite.connect(DB_PATH) as db:
-            if new_name:
-                await db.execute("UPDATE banks SET name = ? WHERE id = ?", (new_name, bank_id))
-                changes.append(f"• **Название:** `{new_name}`")
-            if new_owner_id:
-                await db.execute("UPDATE banks SET owner_id = ? WHERE id = ?", (new_owner_id, bank_id))
-                changes.append(f"• **Владелец:** <@{new_owner_id}>")
-            if new_rate_raw:
+            changes = []
+            async with aiosqlite.connect(DB_PATH) as db:
+                if new_name:
+                    await db.execute("UPDATE banks SET name = ? WHERE id = ?", (new_name, bank_id))
+                    changes.append(f"• **Название:** `{new_name}`")
+                if new_owner_id:
+                    await db.execute("UPDATE banks SET owner_id = ? WHERE id = ?", (new_owner_id, bank_id))
+                    changes.append(f"• **Владелец:** <@{new_owner_id}>")
+                if new_rate_raw:
+                    try:
+                        new_rate = float(new_rate_raw.replace(",", "."))
+                        await db.execute("UPDATE banks SET interest_rate = ? WHERE id = ?", (new_rate, bank_id))
+                        changes.append(f"• **Ставка:** `{new_rate}%`")
+                    except ValueError:
+                        pass
+                await db.commit()
+
+            bank = await get_bank(bank_id)
+            if bank and bank["control_channel_id"] and bank["control_message_id"]:
                 try:
-                    new_rate = float(new_rate_raw.replace(",", "."))
-                    await db.execute("UPDATE banks SET interest_rate = ? WHERE id = ?", (new_rate, bank_id))
-                    changes.append(f"• **Ставка:** `{new_rate}%`")
-                except ValueError:
+                    ch = self.bot.get_channel(bank["control_channel_id"])
+                    if ch:
+                        msg = await ch.fetch_message(bank["control_message_id"])
+                        comps = await self.build_bank_control_components(bank_id)
+                        await msg.edit(components=comps)
+                except Exception:
                     pass
-            await db.commit()
 
-        bank = await get_bank(bank_id)
-        if bank and bank["control_channel_id"] and bank["control_message_id"]:
-            try:
-                ch = self.bot.get_channel(bank["control_channel_id"])
-                if ch:
-                    msg = await ch.fetch_message(bank["control_message_id"])
-                    comps = await self.build_bank_control_components(bank_id)
-                    await msg.edit(components=comps)
-            except Exception:
-                pass
+            if changes:
+                desc = "Были обновлены параметры банка:\n" + "\n".join(changes)
+                await inter.response.send_message(desc, ephemeral=True, delete_after=10)
+            else:
+                await inter.response.defer()
 
-        if changes:
-            desc = "Были обновлены параметры банка:\n" + "\n".join(changes)
-            await inter.response.send_message(desc, ephemeral=True, delete_after=10)
-        else:
-            await inter.response.defer()
+        # 2. Пополнение / снятие средств из казны банка
+        elif custom_id.startswith("bank_modal:balance:"):
+            bank_id = int(custom_id.split(":")[2])
+            bank = await get_bank(bank_id)
+            if not bank:
+                return await inter.response.send_message("❌ Банк не найден.", ephemeral=True)
+
+            raw_action = inter.text_values["action_type"].strip().lower()
+            raw_amount = inter.text_values["amount"].strip().replace(" ", "").replace(",", "")
+
+            if not raw_amount.isdigit() or int(raw_amount) <= 0:
+                return await inter.response.send_message("❌ Некорректная сумма операции.", ephemeral=True)
+
+            amount = int(raw_amount)
+            user_balance = await get_user_info(inter.author.id, "balance") or 0
+
+            # Внесение наличных средств владельцем в казну банка
+            if any(word in raw_action for word in ["пополнить", "внести", "взнос", "+", "deposit"]):
+                if user_balance < amount:
+                    return await inter.response.send_message(
+                        f"❌ Недостаточно наличных средств! (У вас на руках: `{format_number(user_balance)}` R$).",
+                        ephemeral=True
+                    )
+
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, inter.author.id))
+                    await db.execute("UPDATE banks SET balance = balance + ? WHERE id = ?", (amount, bank_id))
+                    await db.commit()
+
+                await self.bank_money_logger(
+                    bank_id=bank_id,
+                    op_type="deposit",
+                    user1_id=inter.author.id,
+                    amount=amount,
+                    extra="Владелец пополнил казну банка из личных средств."
+                )
+
+                await inter.response.send_message(
+                    f"✅ Вы внесли `{format_number(amount)}` R$ в казну банка «{bank['name']}»!",
+                    ephemeral=True
+                )
+
+            # Снятие средств владельцем из казны банка в наличные
+            elif any(word in raw_action for word in ["снять", "вывести", "-", "withdraw"]):
+                if bank["balance"] < amount:
+                    return await inter.response.send_message(
+                        f"❌ В казне банка недостаточно средств! (Резерв: `{format_number(bank['balance'])}` R$).",
+                        ephemeral=True
+                    )
+
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("UPDATE banks SET balance = balance - ? WHERE id = ?", (amount, bank_id))
+                    await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, inter.author.id))
+                    await db.commit()
+
+                await self.bank_money_logger(
+                    bank_id=bank_id,
+                    op_type="withdraw",
+                    user1_id=inter.author.id,
+                    amount=amount,
+                    extra="Владелец снял средства из казны банка на руки."
+                )
+
+                await inter.response.send_message(
+                    f"✅ Вы успешно вывели `{format_number(amount)}` R$ из казны банка!",
+                    ephemeral=True
+                )
+            else:
+                return await inter.response.send_message(
+                    "❌ Неизвестное действие. Укажите: **пополнить** или **снять**.",
+                    ephemeral=True
+                )
+
+            # Обновляем карточку управления банком
+            components = await self.build_bank_control_components(bank_id)
+            channel = self.bot.get_channel(bank["control_channel_id"])
+            if channel and bank["control_message_id"]:
+                try:
+                    msg = await channel.fetch_message(bank["control_message_id"])
+                    await msg.edit(components=components)
+                except Exception:
+                    pass
+
 
     @commands.Cog.listener("on_dropdown")
     async def handle_freeze_select(self, inter: disnake.MessageInteraction):
