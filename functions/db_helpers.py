@@ -339,9 +339,30 @@ async def init_bank_db():
                 interest_rate REAL NOT NULL DEFAULT 5.0,
                 control_channel_id INTEGER DEFAULT NULL,
                 log_channel_id INTEGER DEFAULT NULL,
-                control_message_id INTEGER DEFAULT NULL
+                control_message_id INTEGER DEFAULT NULL,
+                min_loan_amount INTEGER NOT NULL DEFAULT 100,
+                max_loan_amount INTEGER NOT NULL DEFAULT 1000000,
+                loan_approval_threshold INTEGER NOT NULL DEFAULT 100000,
+                max_loans_per_user INTEGER NOT NULL DEFAULT 1,
+                is_national BOOLEAN NOT NULL DEFAULT 0
             )
         """)
+
+        # Безопасная миграция для уже существующей таблицы banks
+        async with db.execute("PRAGMA table_info(banks)") as cursor:
+            existing_cols = {row[1] for row in await cursor.fetchall()}
+
+        bank_migrations = {
+            "min_loan_amount": "INTEGER NOT NULL DEFAULT 100",
+            "max_loan_amount": "INTEGER NOT NULL DEFAULT 1000000",
+            "loan_approval_threshold": "INTEGER NOT NULL DEFAULT 100000",
+            "max_loans_per_user": "INTEGER NOT NULL DEFAULT 1",
+            "is_national": "BOOLEAN NOT NULL DEFAULT 0"
+        }
+        for col_name, col_def in bank_migrations.items():
+            if col_name not in existing_cols:
+                await db.execute(f"ALTER TABLE banks ADD COLUMN {col_name} {col_def}")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bank_accounts (
                 account_number TEXT PRIMARY KEY,
@@ -367,10 +388,40 @@ async def init_bank_db():
                 created_at INTEGER NOT NULL,
                 next_payment_time INTEGER NOT NULL,
                 is_closed BOOLEAN NOT NULL DEFAULT 0,
+                borrower_bank_id INTEGER DEFAULT NULL,
                 FOREIGN KEY (account_number) REFERENCES bank_accounts(account_number),
                 FOREIGN KEY (bank_id) REFERENCES banks(id)
             )
         """)
+        # Миграция для bank_loans (borrower_bank_id)
+        async with db.execute("PRAGMA table_info(bank_loans)") as cursor:
+            existing_loan_cols = {row[1] for row in await cursor.fetchall()}
+        if "borrower_bank_id" not in existing_loan_cols:
+            await db.execute("ALTER TABLE bank_loans ADD COLUMN borrower_bank_id INTEGER DEFAULT NULL")
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bank_loan_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                bank_id INTEGER NOT NULL,
+                account_number TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                days INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL,
+                reviewed_by INTEGER DEFAULT NULL,
+                message_id INTEGER DEFAULT NULL,
+                borrower_bank_id INTEGER DEFAULT NULL,
+                FOREIGN KEY (account_number) REFERENCES bank_accounts(account_number),
+                FOREIGN KEY (bank_id) REFERENCES banks(id)
+            )
+        """)
+        # Миграция для bank_loan_requests (borrower_bank_id)
+        async with db.execute("PRAGMA table_info(bank_loan_requests)") as cursor:
+            existing_req_cols = {row[1] for row in await cursor.fetchall()}
+        if "borrower_bank_id" not in existing_req_cols:
+            await db.execute("ALTER TABLE bank_loan_requests ADD COLUMN borrower_bank_id INTEGER DEFAULT NULL")
+
         await db.commit()
 
 async def generate_unique_account_number(bank_id: int) -> str:
@@ -387,6 +438,20 @@ async def get_all_banks():
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM banks") as cursor:
             return await cursor.fetchall()
+
+async def get_national_bank():
+    """Возвращает данные действующего Национального банка Резендии."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM banks WHERE is_national = 1 LIMIT 1") as cursor:
+            return await cursor.fetchone()
+
+async def set_national_bank(bank_id: int):
+    """Назначает банк Национальным банком Резендии, снимая статус с других."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE banks SET is_national = 0")
+        await db.execute("UPDATE banks SET is_national = 1, type = 'государственный' WHERE id = ?", (bank_id,))
+        await db.commit()
 
 async def get_bank(bank_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -469,3 +534,108 @@ async def get_loan_by_id(loan_id: int):
             WHERE l.id = ?
         """, (loan_id,)) as cursor:
             return await cursor.fetchone()
+
+async def get_loan_request_by_id(request_id: int):
+    """Получить заявку на кредит по ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT r.*, b.name as bank_name, b.interest_rate, b.log_channel_id, b.control_channel_id, b.balance as bank_balance
+            FROM bank_loan_requests r
+            JOIN banks b ON r.bank_id = b.id
+            WHERE r.id = ?
+        """, (request_id,)) as cursor:
+            return await cursor.fetchone()
+
+async def get_user_bank_active_loans_count(user_id: int, bank_id: int) -> int:
+    """Количество активных кредитов пользователя в конкретном банке."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM bank_loans WHERE user_id = ? AND bank_id = ? AND is_closed = 0",
+            (user_id, bank_id)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+async def has_pending_loan_request(user_id: int, bank_id: int) -> bool:
+    """Проверка наличия ожидающей рассмотрения заявки на кредит."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM bank_loan_requests WHERE user_id = ? AND bank_id = ? AND status = 'pending' LIMIT 1",
+            (user_id, bank_id)
+        ) as cursor:
+            return bool(await cursor.fetchone())
+
+async def get_account_active_loans(account_number: str):
+    """Проверка наличия непогашенных кредитов, привязанных к счету."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM bank_loans WHERE account_number = ? AND is_closed = 0",
+            (account_number,)
+        ) as cursor:
+            return await cursor.fetchall()
+
+async def close_bank_account(account_number: str) -> Optional[dict]:
+    """
+    Закрывает (удаляет) лицевой счет:
+    Возвращает данные счета или None, если счет не найден.
+    Если на счете были деньги, начисляет их на баланс пользователя.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT a.*, b.name as bank_name, b.log_channel_id
+            FROM bank_accounts a
+            JOIN banks b ON a.bank_id = b.id
+            WHERE a.account_number = ?
+        """, (account_number,)) as cursor:
+            account = await cursor.fetchone()
+
+        if not account:
+            return None
+
+        account_dict = dict(account)
+
+        # Выплачиваем остаток наличными, если баланс > 0
+        if account_dict["balance"] > 0:
+            await db.execute(
+                "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+                (account_dict["balance"], account_dict["user_id"])
+            )
+
+        # Удаляем счет
+        await db.execute("DELETE FROM bank_accounts WHERE account_number = ?", (account_number,))
+        await db.commit()
+        return account_dict
+
+async def get_bank_active_interbank_loans(bank_id: int):
+    """Возвращает активные непогашенные межбанковские кредиты, взятые банком у Нацбанка."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT l.*, b.name as lender_bank_name
+            FROM bank_loans l
+            JOIN banks b ON l.bank_id = b.id
+            WHERE l.borrower_bank_id = ? AND l.is_closed = 0
+        """, (bank_id,)) as cursor:
+            return await cursor.fetchall()
+
+async def get_bank_interbank_loans_count(bank_id: int, lender_bank_id: int) -> int:
+    """Количество активных межбанковских кредитов банка у конкретного банка-кредитора (Нацбанка)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM bank_loans WHERE borrower_bank_id = ? AND bank_id = ? AND is_closed = 0",
+            (bank_id, lender_bank_id)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+async def has_pending_interbank_loan_request(bank_id: int, lender_bank_id: int) -> bool:
+    """Проверка наличия ожидающей рассмотрения заявки на межбанковский кредит."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM bank_loan_requests WHERE borrower_bank_id = ? AND bank_id = ? AND status = 'pending' LIMIT 1",
+            (bank_id, lender_bank_id)
+        ) as cursor:
+            return bool(await cursor.fetchone())

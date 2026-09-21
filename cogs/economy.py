@@ -284,16 +284,18 @@ class EconomyCog(commands.Cog):
         embed_sender = create_embed(
             title="✅ Перевод выполнен",
             description=(
-                f"Вы успешно перевели `{format_number(количество)}` R$ пользователю {пользователь.mention}.\n"
-                f"Ваш новый баланс: `{format_number(new_sender_balance)}` R$."
+                f"Вы успешно перевели R$ `{format_number(количество)}` пользователю {пользователь.mention}.\n"
+                f"Ваш новый баланс: R$ `{format_number(new_sender_balance)}`."
+                f"Баланс получателя: R$ `{format_number(new_receiver_balance)}`."
             ),
             color=disnake.Color.green()
         )
         embed_receiver = create_embed(
             title="💸 Вам перевели деньги",
             description=(
-                f"Вам успешно перевели `{format_number(количество)}` R$ пользователем {inter.author.mention}.\n"
-                f"Ваш новый баланс: `{format_number(new_receiver_balance)}` R$."
+                f"Вам успешно перевели R$ `{format_number(количество)}` пользователем {inter.author.mention}.\n"
+                f"Ваш новый баланс: R$ `{format_number(new_receiver_balance)}`."
+                f"Баланс отправителя: R$ `{format_number(new_sender_balance)}`."
             ),
             color=disnake.Color.green()
         )

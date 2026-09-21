@@ -20,7 +20,17 @@ from functions.db_helpers import (
     get_bank_total_issued_loans,
     get_user_info,
     update_user_info,
-    is_user_registered
+    is_user_registered,
+    get_loan_request_by_id,
+    get_user_bank_active_loans_count,
+    has_pending_loan_request,
+    get_account_active_loans,
+    close_bank_account,
+    get_national_bank,
+    set_national_bank,
+    get_bank_active_interbank_loans,
+    get_bank_interbank_loans_count,
+    has_pending_interbank_loan_request
 )
 from functions.utils import ensure_admin, ensure_user_registered, notification_send, create_embed, format_number, MAIN_COLOR
 
@@ -215,45 +225,93 @@ class BanksCog(commands.Cog):
                 active_loans_row = await cursor.fetchone()
                 active_loans_total = active_loans_row[0] or 0
 
+        min_loan = bank["min_loan_amount"] if "min_loan_amount" in bank.keys() else 100
+        max_loan = bank["max_loan_amount"] if "max_loan_amount" in bank.keys() else 1000000
+        threshold = bank["loan_approval_threshold"] if "loan_approval_threshold" in bank.keys() else 100000
+        max_user_loans = bank["max_loans_per_user"] if "max_loans_per_user" in bank.keys() else 1
+        threshold_text = f"`{format_number(threshold)}` R$" if threshold > 0 else "Отключено (авто-выдача)"
+        is_nat = bool(bank["is_national"] if "is_national" in bank.keys() else False)
+
+        status_badge = "\n🌟 **СТАТУС: НАЦИОНАЛЬНЫЙ БАНК РЕЗЕНДИИ** 🏛️" if is_nat else ""
+        loan_target_desc = "межбанковские кредиты" if is_nat else "кредитование граждан"
+
+        # Проверяем, есть ли у этого банка непогашенные межбанковские кредиты в Нацбанке
+        interbank_loans = await get_bank_active_interbank_loans(bank_id) if not is_nat else []
+        interbank_debt_total = sum(l["remaining_debt"] for l in interbank_loans)
+        interbank_info = f"\n• **Долг перед Нацбанком:** `{format_number(interbank_debt_total)}` R$ ({len(interbank_loans)} кред.)" if interbank_debt_total > 0 else ""
+
         content = (
-            f"### 🏛️ Панель управления банком «{bank['name']}»\n\n"
+            f"### 🏛️ Панель управления банком «{bank['name']}»{status_badge}\n\n"
             f"• **ID банка:** `{bank['id']}`\n"
             f"• **Тип:** `{bank['type']}`\n"
             f"• **Владелец:** {owner_text}\n"
             f"• **Казна (Резерв):** `{format_number(bank['balance'])}` R$\n"
             f"• **Кредитная ставка:** `{bank['interest_rate']}%`\n"
-            f"• **Активные выданные займы:** `{format_number(active_loans_total)}` R$\n"
+            f"• **Лимиты ({loan_target_desc}):** от `{format_number(min_loan)}` до `{format_number(max_loan)}` R$\n"
+            f"• **Порог одобрения:** {threshold_text}\n"
+            f"• **Лимит кредитов на заемщика:** `{max_user_loans}` шт.\n"
+            f"• **Активные выданные займы:** `{format_number(active_loans_total)}` R${interbank_info}\n"
         )
 
-        return [
-            disnake.ui.Container(disnake.ui.TextDisplay(content=content)),
-            disnake.ui.ActionRow(
-                disnake.ui.Button(
-                    label="Изменить данные",
-                    emoji="⚙️",
-                    style=disnake.ButtonStyle.secondary,
-                    custom_id=f"bank_ctrl:edit:{bank_id}"
-                ),
-                disnake.ui.Button(
-                    label="Счета клиентов",
-                    emoji="🔒",
-                    style=disnake.ButtonStyle.secondary,
-                    custom_id=f"bank_ctrl:freeze:{bank_id}"
-                ),
-                disnake.ui.Button(
-                    label="Казна банка",
-                    emoji="💰",
-                    style=disnake.ButtonStyle.success,
-                    custom_id=f"bank_ctrl:balance:{bank_id}"
-                ),
-                disnake.ui.Button(
-                    label="Обновить",
-                    emoji="🔄",
-                    style=disnake.ButtonStyle.primary,
-                    custom_id=f"bank_ctrl:refresh:{bank_id}"
-                )
+        row1 = disnake.ui.ActionRow(
+            disnake.ui.Button(
+                label="Изменить данные",
+                emoji="⚙️",
+                style=disnake.ButtonStyle.secondary,
+                custom_id=f"bank_ctrl:edit:{bank_id}"
+            ),
+            disnake.ui.Button(
+                label="Лимиты кредитов",
+                emoji="📊",
+                style=disnake.ButtonStyle.secondary,
+                custom_id=f"bank_ctrl:limits:{bank_id}"
+            ),
+            disnake.ui.Button(
+                label="Счета клиентов",
+                emoji="🔒",
+                style=disnake.ButtonStyle.secondary,
+                custom_id=f"bank_ctrl:freeze:{bank_id}"
+            ),
+            disnake.ui.Button(
+                label="Казна банка",
+                emoji="💰",
+                style=disnake.ButtonStyle.success,
+                custom_id=f"bank_ctrl:balance:{bank_id}"
+            ),
+            disnake.ui.Button(
+                label="Обновить",
+                emoji="🔄",
+                style=disnake.ButtonStyle.primary,
+                custom_id=f"bank_ctrl:refresh:{bank_id}"
             )
-        ]
+        )
+
+        rows = [disnake.ui.Container(disnake.ui.TextDisplay(content=content)), row1]
+
+        # Для коммерческих банков добавляем второй ряд с кнопками межбанковского кредитования
+        if not is_nat:
+            nat_bank = await get_national_bank()
+            if nat_bank:
+                row2_buttons = [
+                    disnake.ui.Button(
+                        label="Кредит в Нацбанке",
+                        emoji="🏛️",
+                        style=disnake.ButtonStyle.primary,
+                        custom_id=f"bank_ctrl:interbank_req:{bank_id}"
+                    )
+                ]
+                if interbank_debt_total > 0:
+                    row2_buttons.append(
+                        disnake.ui.Button(
+                            label="Погасить долг Нацбанку",
+                            emoji="💸",
+                            style=disnake.ButtonStyle.danger,
+                            custom_id=f"bank_ctrl:interbank_pay:{bank_id}"
+                        )
+                    )
+                rows.append(disnake.ui.ActionRow(*row2_buttons))
+
+        return rows
 
     async def user_accounts_autocomp(self, inter: disnake.ApplicationCommandInteraction, user_input: str):
         accounts = await get_user_accounts(inter.author.id)
@@ -471,6 +529,48 @@ class BanksCog(commands.Cog):
         await inter.edit_original_message(content=f"✅ Банк **«{название}»** успешно распущен.")
 
 
+    @bank_group.sub_command(
+        name="set_national",
+        description="Назначить банк Национальным банком Резендии (Администрация)"
+    )
+    @commands.has_permissions(administrator=True)
+    async def bank_set_national(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        банк: str = commands.Param(description="Выберите банк", autocomplete=bank_autocomplete)
+    ):
+        if not await ensure_admin(inter):
+            return
+
+        await inter.response.defer(ephemeral=True)
+        bank_id = int(банк)
+        target_bank = await get_bank(bank_id)
+        if not target_bank:
+            return await inter.edit_original_message(content="❌ Указанный банк не найден.")
+
+        # Назначаем выбранный банк Национальным банком
+        await set_national_bank(bank_id)
+
+        # Обновляем карточку банка
+        comps = await self.build_bank_control_components(bank_id)
+        channel = self.bot.get_channel(target_bank["control_channel_id"])
+        if channel and target_bank["control_message_id"]:
+            try:
+                msg = await channel.fetch_message(target_bank["control_message_id"])
+                await msg.edit(components=comps)
+            except Exception:
+                pass
+
+        await notification_send(
+            inter,
+            title="🏛️ Назначен Национальный банк",
+            description=f"Банк **«{target_bank['name']}»** официально наделен статусом **Национального банка Резендии**!\nНацбанк осуществляет межбанковское кредитование коммерческих банков страны.",
+            color=disnake.Color.gold()
+        )
+
+        await inter.edit_original_message(content=f"✅ Банк **«{target_bank['name']}»** (ID: `{bank_id}`) успешно назначен **Национальным банком Резендии**.")
+
+
     @bank_group.sub_command(name="accounts", description="Посмотреть банковские счета")
     async def bank_accounts_view(
         self,
@@ -649,6 +749,52 @@ class BanksCog(commands.Cog):
         await inter.edit_original_message(embed=embed)
 
 
+    @bank_group.sub_command(name="close", description="Закрыть лицевой счет в банке")
+    async def bank_account_close(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        счет: str = commands.Param(description="Номер закрываемого счета", autocomplete=user_accounts_autocomp)
+    ):
+        if not await ensure_user_registered(inter, inter.author.id):
+            return
+
+        await inter.response.defer(ephemeral=True)
+        account = await self.validate_account(inter, счет, check_owner=True, check_frozen=False)
+        if not account:
+            return
+
+        # Проверяем, нет ли активных незакрытых кредитов на этом счете
+        active_loans = await get_account_active_loans(счет)
+        if active_loans:
+            loan_ids = ", ".join([f"#{l['id']}" for l in active_loans])
+            return await inter.edit_original_message(
+                content=f"❌ Нельзя закрыть лицевой счет `{счет}`, пока на нем числятся непогашенные кредиты ({loan_ids})! Погасите их через `/credit pay`."
+            )
+
+        balance_to_refund = account["balance"]
+        closed_account = await close_bank_account(счет)
+        if not closed_account:
+            return await inter.edit_original_message(content="❌ Не удалось закрыть счет. Возможно, он уже был удален.")
+
+        refund_text = f"\n💵 Остаток средств в размере `{format_number(balance_to_refund)}` R$ выдан вам на руки наличными." if balance_to_refund > 0 else ""
+
+        await self.bank_money_logger(
+            bank_id=account["bank_id"],
+            op_type="close",
+            user1_id=inter.author.id,
+            account1=счет,
+            amount=balance_to_refund,
+            extra=f"Счет закрыт клиентом. Выплачено на руки: {format_number(balance_to_refund)} R$"
+        )
+
+        embed = create_embed(
+            title="🗑️ Лицевой счет закрыт",
+            description=f"Ваш лицевой счет `{счет}` в банке **«{account['bank_name']}»** был успешно аннулирован.{refund_text}",
+            color=disnake.Color.dark_gray()
+        )
+        await inter.edit_original_message(embed=embed)
+
+
 
     @commands.slash_command(
         name="send_bank_services_panel",
@@ -691,6 +837,12 @@ class BanksCog(commands.Cog):
                     style=disnake.ButtonStyle.primary,
                     emoji="💰",
                     custom_id="service_btn:take_loan"
+                ),
+                disnake.ui.Button(
+                    label="Закрыть счет",
+                    style=disnake.ButtonStyle.danger,
+                    emoji="🗑️",
+                    custom_id="service_btn:close_account"
                 )
             )
         ]
@@ -866,13 +1018,26 @@ class BanksCog(commands.Cog):
             )
 
         elif action == "take_loan":
+            # Физические лица не могут брать кредит в Национальном банке
+            commercial_banks = [b for b in banks if not (b["is_national"] if "is_national" in b.keys() else False)]
+            if not commercial_banks:
+                return await inter.response.send_message("❌ В государстве нет коммерческих банков, выдающих кредиты гражданам.", ephemeral=True)
+
+            loan_bank_options = [
+                disnake.SelectOption(
+                    label=b["name"][:100],
+                    value=str(b["id"]),
+                    description=f"Ставка: {b['interest_rate']}% | Баланс: {format_number(b['balance'])} R$"
+                ) for b in commercial_banks[:25]
+            ]
+
             modal_components = [
                 disnake.ui.Label(
-                    text="Выберите банк",
+                    text="Выберите коммерческий банк",
                     component=disnake.ui.StringSelect(
                         custom_id="loan_bank_id",
                         placeholder="Банк-кредитор",
-                        options=bank_options,
+                        options=loan_bank_options,
                         min_values=1,
                         max_values=1
                     )
@@ -905,6 +1070,28 @@ class BanksCog(commands.Cog):
                 custom_id="modal:bank_service:take_loan",
                 components=modal_components
             )
+
+        elif action == "close_account":
+            user_accs = await get_user_accounts(inter.author.id)
+            if not user_accs:
+                return await inter.response.send_message("❌ У вас нет открытых лицевых счетов в банках.", ephemeral=True)
+
+            acc_options = [
+                disnake.SelectOption(
+                    label=f"{acc['account_number']} ({acc['bank_name']})",
+                    value=acc["account_number"],
+                    description=f"Баланс: {format_number(acc['balance'])} R$"[:100]
+                ) for acc in user_accs[:25]
+            ]
+
+            view = disnake.ui.View(timeout=60)
+            select = disnake.ui.StringSelect(
+                custom_id="service_select:close_acc",
+                placeholder="Выберите счет, который хотите закрыть",
+                options=acc_options
+            )
+            view.add_item(select)
+            await inter.response.send_message("Выберите лицевой счет для закрытия (удаления):", view=view, ephemeral=True)
 
     # =========================================================
     #            ОБРАБОТКА МОДАЛОК ПАНЕЛИ УСЛУГ
@@ -944,8 +1131,30 @@ class BanksCog(commands.Cog):
             amount = int(raw_amount)
             days = int(raw_days)
 
-            if not (100 <= amount <= 1000000):
-                return await inter.response.send_message("❌ Сумма кредита должна быть от 100 до 1 000 000 R$.", ephemeral=True, delete_after=10)
+            bank = await get_bank(bank_id)
+            if not bank:
+                return await inter.response.send_message("❌ Выбранный банк не найден.", ephemeral=True, delete_after=10)
+
+            # Проверка: Национальный банк кредитует только коммерческие банки
+            is_national = bank["is_national"] if "is_national" in bank.keys() else False
+            if is_national:
+                return await inter.response.send_message(
+                    "❌ Национальный банк Резендии кредитует исключительно коммерческие банки государства. Кредитование физических лиц запрещено.",
+                    ephemeral=True,
+                    delete_after=15
+                )
+
+            min_loan = bank["min_loan_amount"] if "min_loan_amount" in bank.keys() else 100
+            max_loan = bank["max_loan_amount"] if "max_loan_amount" in bank.keys() else 1000000
+            threshold = bank["loan_approval_threshold"] if "loan_approval_threshold" in bank.keys() else 100000
+            max_user_loans = bank["max_loans_per_user"] if "max_loans_per_user" in bank.keys() else 1
+
+            if not (min_loan <= amount <= max_loan):
+                return await inter.response.send_message(
+                    f"❌ Сумма кредита в данном банке должна быть в диапазоне от `{format_number(min_loan)}` до `{format_number(max_loan)}` R$.",
+                    ephemeral=True,
+                    delete_after=10
+                )
 
             if not (1 <= days <= 14):
                 return await inter.response.send_message("❌ Срок кредита должен быть от 1 до 14 дней.", ephemeral=True, delete_after=10)
@@ -959,25 +1168,62 @@ class BanksCog(commands.Cog):
                     delete_after=10
                 )
 
-            bank = await get_bank(bank_id)
+            # Проверка максимального количества активных кредитов в этом банке
+            active_loans_count = await get_user_bank_active_loans_count(inter.author.id, bank_id)
+            if active_loans_count >= max_user_loans:
+                return await inter.response.send_message(
+                    f"❌ Превышен лимит активных кредитов в банке «{bank['name']}»! Допустимо: `{max_user_loans}`, у вас активно: `{active_loans_count}`.",
+                    ephemeral=True,
+                    delete_after=10
+                )
+
+            # Проверка, нет ли уже ожидающей заявки
+            if await has_pending_loan_request(inter.author.id, bank_id):
+                return await inter.response.send_message(
+                    "❌ У вас уже есть заявка на кредит в этом банке, ожидающая рассмотрения руководством.",
+                    ephemeral=True,
+                    delete_after=10
+                )
+
             total_debt = int(amount * (1 + (bank["interest_rate"] / 100)))
 
-            embed = create_embed(
-                title="Подтверждение кредита",
-                description=(
-                    f"🏦 **Банк:** {bank['name']}\n"
-                    f"💵 **Тело кредита:** `{format_number(amount)}` R$\n"
-                    f"📈 **Итого к возврату:** `{format_number(total_debt)}` R$ ({bank['interest_rate']}%)\n"
-                    f"⏳ **Срок:** `{days}` дн.\n"
-                    f"💳 **Счет зачисления:** `{target_acc['account_number']}`"
-                ),
-                color=disnake.Color.purple()
-            )
-            view = disnake.ui.View(timeout=60)
-            view.add_item(disnake.ui.Button(label="Подтвердить", style=disnake.ButtonStyle.success, custom_id=f"confirm_loan:{bank_id}:{amount}:{days}"))
-            view.add_item(disnake.ui.Button(label="Отмена", style=disnake.ButtonStyle.secondary, custom_id="confirm_acc_cancel"))
+            # Проверяем, требуется ли ручное одобрение руководством банка
+            needs_approval = (threshold > 0 and amount >= threshold)
 
-            await inter.response.send_message(embed=embed, view=view, ephemeral=True, delete_after=30)
+            if needs_approval:
+                embed = create_embed(
+                    title="📝 Заявка на кредит (требует одобрения)",
+                    description=(
+                        f"🏦 **Банк:** {bank['name']}\n"
+                        f"💵 **Запрашиваемая сумма:** `{format_number(amount)}` R$\n"
+                        f"📈 **Итого к возврату:** `{format_number(total_debt)}` R$ ({bank['interest_rate']}%)\n"
+                        f"⏳ **Срок:** `{days}` дн.\n"
+                        f"💳 **Счет зачисления:** `{target_acc['account_number']}`\n\n"
+                        f"⚠️ Сумма кредита превышает установленный порог авто-выдачи (`{format_number(threshold)}` R$).\n"
+                        f"Заявка будет направлена руководству банка на рассмотрение."
+                    ),
+                    color=disnake.Color.gold()
+                )
+                view = disnake.ui.View(timeout=60)
+                view.add_item(disnake.ui.Button(label="Отправить на рассмотрение", style=disnake.ButtonStyle.primary, custom_id=f"submit_loan_req:{bank_id}:{amount}:{days}"))
+                view.add_item(disnake.ui.Button(label="Отмена", style=disnake.ButtonStyle.secondary, custom_id="confirm_acc_cancel"))
+                await inter.response.send_message(embed=embed, view=view, ephemeral=True, delete_after=45)
+            else:
+                embed = create_embed(
+                    title="Подтверждение кредита",
+                    description=(
+                        f"🏦 **Банк:** {bank['name']}\n"
+                        f"💵 **Тело кредита:** `{format_number(amount)}` R$\n"
+                        f"📈 **Итого к возврату:** `{format_number(total_debt)}` R$ ({bank['interest_rate']}%)\n"
+                        f"⏳ **Срок:** `{days}` дн.\n"
+                        f"💳 **Счет зачисления:** `{target_acc['account_number']}`"
+                    ),
+                    color=disnake.Color.purple()
+                )
+                view = disnake.ui.View(timeout=60)
+                view.add_item(disnake.ui.Button(label="Подтвердить", style=disnake.ButtonStyle.success, custom_id=f"confirm_loan:{bank_id}:{amount}:{days}"))
+                view.add_item(disnake.ui.Button(label="Отмена", style=disnake.ButtonStyle.secondary, custom_id="confirm_acc_cancel"))
+                await inter.response.send_message(embed=embed, view=view, ephemeral=True, delete_after=30)
 
 
 
@@ -1059,6 +1305,316 @@ class BanksCog(commands.Cog):
 
             await inter.response.edit_message(
                 content=f"✅ Кредит на сумму `{format_number(amount)}` R$ выдан на счет `{target_acc['account_number']}`!",
+                embed=None,
+                view=None
+            )
+
+        elif custom_id.startswith("submit_loan_req:"):
+            _, bank_id_str, amount_str, days_str = custom_id.split(":")
+            bank_id = int(bank_id_str)
+            amount = int(amount_str)
+            days = int(days_str)
+
+            user_accs = await get_user_accounts(inter.author.id)
+            target_acc = next((a for a in user_accs if a["bank_id"] == bank_id and not a["is_frozen"]), None)
+            if not target_acc:
+                return await inter.response.edit_message(content="❌ Активный счет не найден.", embed=None, view=None)
+
+            bank = await get_bank(bank_id)
+            now = int(time.time())
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute("""
+                    INSERT INTO bank_loan_requests (user_id, bank_id, account_number, amount, days, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                """, (inter.author.id, bank_id, target_acc["account_number"], amount, days, now))
+                req_id = cursor.lastrowid
+                await db.commit()
+
+            # Отправляем карточку заявки в канал управления банком
+            control_channel = self.bot.get_channel(bank["control_channel_id"]) if bank["control_channel_id"] else None
+            req_msg = None
+            total_debt = int(amount * (1 + (bank["interest_rate"] / 100)))
+
+            if control_channel:
+                req_embed = create_embed(
+                    title=f"📋 Заявка на кредит #{req_id}",
+                    description=(
+                        f"**Клиент:** {inter.author.mention} (`{inter.author.id}`)\n"
+                        f"**Лицевой счет:** `{target_acc['account_number']}`\n"
+                        f"**Запрашиваемая сумма:** `{format_number(amount)}` R$\n"
+                        f"**Срок:** `{days}` дн.\n"
+                        f"**Итоговый долг:** `{format_number(total_debt)}` R$ ({bank['interest_rate']}%)\n"
+                        f"**Казна банка:** `{format_number(bank['balance'])}` R$\n"
+                        f"**Дата подачи:** <t:{now}:F>"
+                    ),
+                    color=disnake.Color.gold()
+                )
+                req_view = disnake.ui.View(timeout=None)
+                req_view.add_item(disnake.ui.Button(
+                    label="Одобрить",
+                    style=disnake.ButtonStyle.success,
+                    emoji="✅",
+                    custom_id=f"bank_loan_appr:{req_id}"
+                ))
+                req_view.add_item(disnake.ui.Button(
+                    label="Отклонить",
+                    style=disnake.ButtonStyle.danger,
+                    emoji="❌",
+                    custom_id=f"bank_loan_rejt:{req_id}"
+                ))
+                try:
+                    owner_ping = f"<@{bank['owner_id']}> " if bank["owner_id"] else ""
+                    req_msg = await control_channel.send(content=f"🔔 {owner_ping}Новая заявка на кредит, требующая одобрения!", embed=req_embed, view=req_view)
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("UPDATE bank_loan_requests SET message_id = ? WHERE id = ?", (req_msg.id, req_id))
+                        await db.commit()
+                except Exception:
+                    pass
+
+            await inter.response.edit_message(
+                content=f"✅ Ваша заявка `#{req_id}` на кредит `{format_number(amount)}` R$ передана на рассмотрение руководству банка «{bank['name']}». Вы получите уведомление о решении.",
+                embed=None,
+                view=None
+            )
+
+        elif custom_id.startswith("bank_loan_appr:"):
+            req_id = int(custom_id.split(":")[1])
+            req = await get_loan_request_by_id(req_id)
+            if not req:
+                return await inter.response.send_message("❌ Заявка не найдена.", ephemeral=True)
+
+            bank = await get_bank(req["bank_id"])
+            is_owner = (bank["owner_id"] == inter.author.id)
+            is_admin = inter.author.guild_permissions.administrator
+            if not (is_owner or is_admin):
+                return await inter.response.send_message("⛔ Только руководство банка или администратор может одобрить эту заявку.", ephemeral=True)
+
+            if req["status"] != "pending":
+                return await inter.response.send_message(f"ℹ️ Эта заявка уже рассмотрена (Статус: `{req['status']}`).", ephemeral=True)
+
+            if bank["balance"] < req["amount"]:
+                return await inter.response.send_message(
+                    f"❌ В казне банка недостаточно средств для выдачи кредита! (В казне: `{format_number(bank['balance'])}` R$, требуется: `{format_number(req['amount'])}` R$).",
+                    ephemeral=True
+                )
+
+            borrower_bank_id = req["borrower_bank_id"] if "borrower_bank_id" in req.keys() else None
+            total_debt = int(req["amount"] * (1 + (bank["interest_rate"] / 100)))
+            now = int(time.time())
+            next_due = now + (req["days"] * 86400)
+
+            if borrower_bank_id:
+                # Межбанковский кредит: зачисляем в казну коммерческого банка
+                borrower_bank = await get_bank(borrower_bank_id)
+                if not borrower_bank:
+                    return await inter.response.send_message("❌ Банк-заемщик не найден в базе данных.", ephemeral=True)
+
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("UPDATE banks SET balance = balance + ? WHERE id = ?", (req["amount"], borrower_bank_id))
+                    await db.execute("UPDATE banks SET balance = balance - ? WHERE id = ?", (req["amount"], bank["id"]))
+                    await db.execute("""
+                        INSERT INTO bank_loans (
+                            user_id, bank_id, account_number, original_amount,
+                            total_debt, remaining_debt, period_payment, created_at, next_payment_time, is_closed, borrower_bank_id
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                    """, (req["user_id"], bank["id"], req["account_number"], req["amount"], total_debt, total_debt, total_debt, now, next_due, borrower_bank_id))
+                    await db.execute("""
+                        UPDATE bank_loan_requests
+                        SET status = 'approved', reviewed_by = ?
+                        WHERE id = ?
+                    """, (inter.author.id, req_id))
+                    await db.commit()
+
+                # Логируем в оба банка
+                await self.bank_money_logger(
+                    bank_id=bank["id"],
+                    op_type="credit",
+                    user1_id=req["user_id"],
+                    account1=f"КАЗНА {borrower_bank['name']}",
+                    amount=req["amount"],
+                    extra=f"Межбанковский кредит банку «{borrower_bank['name']}» одобрен {inter.author.display_name}. Долг: {format_number(total_debt)} R$."
+                )
+                await self.bank_money_logger(
+                    bank_id=borrower_bank["id"],
+                    op_type="deposit",
+                    user1_id=req["user_id"],
+                    account1="КАЗНА",
+                    amount=req["amount"],
+                    extra=f"Поступление кредита от Нацбанка «{bank['name']}». Сумма: {format_number(req['amount'])} R$."
+                )
+
+                # Обновляем панель управления банка-заемщика
+                borrower_comps = await self.build_bank_control_components(borrower_bank_id)
+                borrower_ch = self.bot.get_channel(borrower_bank["control_channel_id"])
+                if borrower_ch and borrower_bank["control_message_id"]:
+                    try:
+                        b_msg = await borrower_ch.fetch_message(borrower_bank["control_message_id"])
+                        await b_msg.edit(components=borrower_comps)
+                    except Exception:
+                        pass
+            else:
+                # Обычный кредит физлицу: проверяем счет заемщика
+                acc = await get_account_by_number(req["account_number"])
+                if not acc or acc["is_frozen"]:
+                    return await inter.response.send_message("❌ Счет заемщика заблокирован или не существует.", ephemeral=True)
+
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("UPDATE bank_accounts SET balance = balance + ? WHERE account_number = ?", (req["amount"], req["account_number"]))
+                    await db.execute("UPDATE banks SET balance = balance - ? WHERE id = ?", (req["amount"], bank["id"]))
+                    await db.execute("""
+                        INSERT INTO bank_loans (
+                            user_id, bank_id, account_number, original_amount,
+                            total_debt, remaining_debt, period_payment, created_at, next_payment_time, is_closed
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """, (req["user_id"], bank["id"], req["account_number"], req["amount"], total_debt, total_debt, total_debt, now, next_due))
+                    await db.execute("""
+                        UPDATE bank_loan_requests
+                        SET status = 'approved', reviewed_by = ?
+                        WHERE id = ?
+                    """, (inter.author.id, req_id))
+                    await db.commit()
+
+                await self.bank_money_logger(
+                    bank_id=bank["id"],
+                    op_type="credit",
+                    user1_id=req["user_id"],
+                    account1=req["account_number"],
+                    amount=req["amount"],
+                    extra=f"Заявка #{req_id} одобрена {inter.author.display_name}. Долг: {format_number(total_debt)} R$ на {req['days']} дн."
+                )
+
+            # Уведомляем заемщика в ЛС
+            applicant = self.bot.get_user(req["user_id"])
+            if applicant:
+                applicant_embed = create_embed(
+                    title="🎉 Кредит одобрен!",
+                    description=(
+                        f"Руководство банка «{bank['name']}» одобрило вашу заявку `#{req_id}`.\n\n"
+                        f"• **Сумма:** `{format_number(req['amount'])}` R$\n"
+                        f"• **Зачислено в:** `{'Казну банка' if borrower_bank_id else req['account_number']}`\n"
+                        f"• **Итоговый долг:** `{format_number(total_debt)}` R$\n"
+                        f"• **Срок погашения:** <t:{next_due}:D> (<t:{next_due}:R>)"
+                    ),
+                    color=disnake.Color.green()
+                )
+                try:
+                    await applicant.send(embed=applicant_embed)
+                except disnake.Forbidden:
+                    pass
+
+            # Обновляем карточку сообщения
+            updated_embed = create_embed(
+                title=f"✅ Заявка на кредит #{req_id} [ОДОБРЕНА]",
+                description=(
+                    f"**Клиент:** <@{req['user_id']}>\n"
+                    f"**Назначение:** `{'Казна банка' if borrower_bank_id else req['account_number']}`\n"
+                    f"**Сумма:** `{format_number(req['amount'])}` R$\n"
+                    f"**Одобрил:** {inter.author.mention}\n"
+                    f"**Дата решения:** <t:{now}:F>"
+                ),
+                color=disnake.Color.green()
+            )
+            await inter.response.edit_message(content="✅ Заявка успешно одобрена, средства выданы.", embed=updated_embed, view=None)
+
+            # Обновляем панель управления банка-кредитора
+            comps = await self.build_bank_control_components(bank["id"])
+            channel = self.bot.get_channel(bank["control_channel_id"])
+            if channel and bank["control_message_id"]:
+                try:
+                    msg = await channel.fetch_message(bank["control_message_id"])
+                    await msg.edit(components=comps)
+                except Exception:
+                    pass
+
+        elif custom_id.startswith("bank_loan_rejt:"):
+            req_id = int(custom_id.split(":")[1])
+            req = await get_loan_request_by_id(req_id)
+            if not req:
+                return await inter.response.send_message("❌ Заявка не найдена.", ephemeral=True)
+
+            bank = await get_bank(req["bank_id"])
+            is_owner = (bank["owner_id"] == inter.author.id)
+            is_admin = inter.author.guild_permissions.administrator
+            if not (is_owner or is_admin):
+                return await inter.response.send_message("⛔ Только руководство банка или администратор может отклонить эту заявку.", ephemeral=True)
+
+            if req["status"] != "pending":
+                return await inter.response.send_message(f"ℹ️ Эта заявка уже рассмотрена (Статус: `{req['status']}`).", ephemeral=True)
+
+            now = int(time.time())
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("""
+                    UPDATE bank_loan_requests
+                    SET status = 'rejected', reviewed_by = ?
+                    WHERE id = ?
+                """, (inter.author.id, req_id))
+                await db.commit()
+
+            # Уведомляем заемщика в ЛС
+            applicant = self.bot.get_user(req["user_id"])
+            if applicant:
+                applicant_embed = create_embed(
+                    title="❌ Заявка на кредит отклонена",
+                    description=(
+                        f"Ваша заявка `#{req_id}` на получение кредита на сумму `{format_number(req['amount'])}` R$ "
+                        f"в банке «{bank['name']}» была отклонена руководством банка."
+                    ),
+                    color=disnake.Color.red()
+                )
+                try:
+                    await applicant.send(embed=applicant_embed)
+                except disnake.Forbidden:
+                    pass
+
+            updated_embed = create_embed(
+                title=f"❌ Заявка на кредит #{req_id} [ОТКЛОНЕНА]",
+                description=(
+                    f"**Клиент:** <@{req['user_id']}>\n"
+                    f"**Счет:** `{req['account_number']}`\n"
+                    f"**Сумма:** `{format_number(req['amount'])}` R$\n"
+                    f"**Отклонил:** {inter.author.mention}\n"
+                    f"**Дата решения:** <t:{now}:F>"
+                ),
+                color=disnake.Color.red()
+            )
+            await inter.response.edit_message(content="❌ Заявка отклонена.", embed=updated_embed, view=None)
+
+        elif custom_id.startswith("confirm_close_acc:"):
+            acc_num = custom_id.split(":")[1]
+            account = await self.validate_account(inter, acc_num, check_owner=True, check_frozen=False)
+            if not account:
+                return
+
+            active_loans = await get_account_active_loans(acc_num)
+            if active_loans:
+                loan_ids = ", ".join([f"#{l['id']}" for l in active_loans])
+                return await inter.response.edit_message(
+                    content=f"❌ Нельзя закрыть лицевой счет `{acc_num}`, пока на нем числятся непогашенные кредиты ({loan_ids})!",
+                    embed=None,
+                    view=None
+                )
+
+            balance_to_refund = account["balance"]
+            closed_account = await close_bank_account(acc_num)
+            if not closed_account:
+                return await inter.response.edit_message(content="❌ Не удалось закрыть счет.", embed=None, view=None)
+
+            refund_text = f"\n💵 Остаток средств `{format_number(balance_to_refund)}` R$ выплачен вам наличными." if balance_to_refund > 0 else ""
+
+            await self.bank_money_logger(
+                bank_id=account["bank_id"],
+                op_type="close",
+                user1_id=inter.author.id,
+                account1=acc_num,
+                amount=balance_to_refund,
+                extra=f"Счет закрыт клиентом через меню услуг. Выплачено на руки: {format_number(balance_to_refund)} R$"
+            )
+
+            await inter.response.edit_message(
+                content=f"✅ Лицевой счет `{acc_num}` в банке «{account['bank_name']}» успешно закрыт и удален!{refund_text}",
                 embed=None,
                 view=None
             )
@@ -1147,7 +1703,58 @@ class BanksCog(commands.Cog):
             )
             await inter.response.send_modal(modal=modal)
 
-        # 3. Заморозка / Разморозка счетов клиентов банка
+        # 3. Настройка кредитных лимитов и правил выдачи
+        elif action == "limits":
+            min_loan = bank["min_loan_amount"] if "min_loan_amount" in bank.keys() else 100
+            max_loan = bank["max_loan_amount"] if "max_loan_amount" in bank.keys() else 1000000
+            threshold = bank["loan_approval_threshold"] if "loan_approval_threshold" in bank.keys() else 100000
+            max_user_loans = bank["max_loans_per_user"] if "max_loans_per_user" in bank.keys() else 1
+
+            modal = disnake.ui.Modal(
+                title=f"Лимиты кредитов: {bank['name'][:25]}",
+                custom_id=f"bank_modal:limits:{bank_id}",
+                components=[
+                    disnake.ui.TextInput(
+                        label="Минимальная сумма кредита (R$)",
+                        placeholder=str(min_loan),
+                        value=str(min_loan),
+                        custom_id="min_loan",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=10
+                    ),
+                    disnake.ui.TextInput(
+                        label="Максимальная сумма кредита (R$)",
+                        placeholder=str(max_loan),
+                        value=str(max_loan),
+                        custom_id="max_loan",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=10
+                    ),
+                    disnake.ui.TextInput(
+                        label="Порог одобрения (R$) (0 = без одобрения)",
+                        placeholder=str(threshold),
+                        value=str(threshold),
+                        custom_id="loan_threshold",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=10
+                    ),
+                    disnake.ui.TextInput(
+                        label="Макс. активных кредитов на человека (шт)",
+                        placeholder=str(max_user_loans),
+                        value=str(max_user_loans),
+                        custom_id="max_user_loans",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=3
+                    )
+                ]
+            )
+            await inter.response.send_modal(modal=modal)
+
+        # 4. Заморозка / Разморозка счетов клиентов банка
         elif action == "freeze":
             async with aiosqlite.connect(DB_PATH) as db:
                 db.row_factory = aiosqlite.Row
@@ -1178,7 +1785,7 @@ class BanksCog(commands.Cog):
             view.add_item(select)
             await inter.response.send_message("Выберите счет клиента для заморозки или разблокировки:", view=view, ephemeral=True)
 
-        # 4. Обновление карточки
+        # 5. Обновление карточки
         elif action == "refresh":
             await inter.response.defer()
             comps = await self.build_bank_control_components(bank_id)
@@ -1187,6 +1794,63 @@ class BanksCog(commands.Cog):
             except Exception:
                 # Если кнопка была нажата на самом сообщении канала
                 await inter.message.edit(components=comps)
+
+        # 6. Запрос кредита коммерческим банком у Нацбанка
+        elif action == "interbank_req":
+            nat_bank = await get_national_bank()
+            if not nat_bank:
+                return await inter.response.send_message("❌ В государстве не назначен действующий Национальный банк.", ephemeral=True)
+
+            min_l = nat_bank["min_loan_amount"] if "min_loan_amount" in nat_bank.keys() else 100
+            max_l = nat_bank["max_loan_amount"] if "max_loan_amount" in nat_bank.keys() else 1000000
+            rate = nat_bank["interest_rate"]
+
+            modal = disnake.ui.Modal(
+                title=f"Кредит в Нацбанке: {bank['name'][:20]}",
+                custom_id=f"modal:interbank_req:{bank_id}:{nat_bank['id']}",
+                components=[
+                    disnake.ui.TextInput(
+                        label=f"Сумма в казну банка ({min_l} - {max_l} R$)",
+                        placeholder="Например: 500000",
+                        custom_id="amount",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=12
+                    ),
+                    disnake.ui.TextInput(
+                        label="Срок кредита в днях (от 1 до 30)",
+                        placeholder="Например: 14",
+                        custom_id="days",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=3
+                    )
+                ]
+            )
+            await inter.response.send_modal(modal=modal)
+
+        # 7. Погашение межбанковского кредита перед Нацбанком
+        elif action == "interbank_pay":
+            active_loans = await get_bank_active_interbank_loans(bank_id)
+            if not active_loans:
+                return await inter.response.send_message("ℹ️ У вашего банка нет активных задолженностей перед Национальным банком.", ephemeral=True)
+
+            options = [
+                disnake.SelectOption(
+                    label=f"Кредит #{l['id']} (Остаток: {format_number(l['remaining_debt'])} R$)",
+                    value=str(l["id"]),
+                    description=f"Кредитор: {l['lender_bank_name']} | Срок до <t:{l['next_payment_time']}:D>"[:100]
+                ) for l in active_loans[:25]
+            ]
+
+            view = disnake.ui.View(timeout=60)
+            select = disnake.ui.StringSelect(
+                custom_id=f"select:interbank_pay_loan:{bank_id}",
+                placeholder="Выберите кредит для погашения из казны банка",
+                options=options
+            )
+            view.add_item(select)
+            await inter.response.send_message("Выберите межбанковский кредит для оплаты:", view=view, ephemeral=True)
 
 
     @commands.Cog.listener("on_modal_submit")
@@ -1321,9 +1985,338 @@ class BanksCog(commands.Cog):
                 except Exception:
                     pass
 
+        # 3. Настройка кредитных лимитов
+        elif custom_id.startswith("bank_modal:limits:"):
+            bank_id = int(custom_id.split(":")[2])
+            bank = await get_bank(bank_id)
+            if not bank:
+                return await inter.response.send_message("❌ Банк не найден.", ephemeral=True)
+
+            raw_min = inter.text_values.get("min_loan", "").strip().replace(" ", "")
+            raw_max = inter.text_values.get("max_loan", "").strip().replace(" ", "")
+            raw_thresh = inter.text_values.get("loan_threshold", "").strip().replace(" ", "")
+            raw_max_user = inter.text_values.get("max_user_loans", "").strip().replace(" ", "")
+
+            if not (raw_min.isdigit() and raw_max.isdigit() and raw_thresh.isdigit() and raw_max_user.isdigit()):
+                return await inter.response.send_message("❌ Все значения должны быть положительными целыми числами.", ephemeral=True)
+
+            min_val = int(raw_min)
+            max_val = int(raw_max)
+            thresh_val = int(raw_thresh)
+            max_user_val = int(raw_max_user)
+
+            if min_val <= 0 or max_val <= 0 or max_user_val <= 0:
+                return await inter.response.send_message("❌ Лимиты и количество кредитов должны быть больше 0.", ephemeral=True)
+
+            if min_val > max_val:
+                return await inter.response.send_message("❌ Минимальная сумма не может превышать максимальную!", ephemeral=True)
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("""
+                    UPDATE banks
+                    SET min_loan_amount = ?, max_loan_amount = ?, loan_approval_threshold = ?, max_loans_per_user = ?
+                    WHERE id = ?
+                """, (min_val, max_val, thresh_val, max_user_val, bank_id))
+                await db.commit()
+
+            # Обновляем карточку управления банком
+            components = await self.build_bank_control_components(bank_id)
+            channel = self.bot.get_channel(bank["control_channel_id"])
+            if channel and bank["control_message_id"]:
+                try:
+                    msg = await channel.fetch_message(bank["control_message_id"])
+                    await msg.edit(components=components)
+                except Exception:
+                    pass
+
+            thresh_desc = f"`{format_number(thresh_val)}` R$" if thresh_val > 0 else "Отключено"
+            embed = create_embed(
+                title="⚙️ Параметры кредитования обновлены",
+                description=(
+                    f"**Банк:** «{bank['name']}»\n"
+                    f"• **Минимальный кредит:** `{format_number(min_val)}` R$\n"
+                    f"• **Максимальный кредит:** `{format_number(max_val)}` R$\n"
+                    f"• **Порог ручного одобрения:** {thresh_desc}\n"
+                    f"• **Максимум активных кредитов на человека:** `{max_user_val}` шт."
+                ),
+                color=disnake.Color.green()
+            )
+            await inter.response.send_message(embed=embed, ephemeral=True, delete_after=15)
+
+        # 4. Запрос межбанковского кредита у Нацбанка коммерческим банком
+        elif custom_id.startswith("modal:interbank_req:"):
+            _, _, borrower_bank_id_str, nat_bank_id_str = custom_id.split(":")
+            borrower_bank_id = int(borrower_bank_id_str)
+            nat_bank_id = int(nat_bank_id_str)
+
+            borrower_bank = await get_bank(borrower_bank_id)
+            nat_bank = await get_bank(nat_bank_id)
+
+            if not borrower_bank or not nat_bank:
+                return await inter.response.send_message("❌ Банк или Национальный банк не найдены.", ephemeral=True)
+
+            raw_amount = inter.text_values.get("amount", "").strip().replace(" ", "")
+            raw_days = inter.text_values.get("days", "").strip().replace(" ", "")
+
+            if not (raw_amount.isdigit() and raw_days.isdigit()):
+                return await inter.response.send_message("❌ Сумма и срок должны быть положительными целыми числами.", ephemeral=True)
+
+            amount = int(raw_amount)
+            days = int(raw_days)
+
+            min_loan = nat_bank["min_loan_amount"] if "min_loan_amount" in nat_bank.keys() else 100
+            max_loan = nat_bank["max_loan_amount"] if "max_loan_amount" in nat_bank.keys() else 1000000
+            threshold = nat_bank["loan_approval_threshold"] if "loan_approval_threshold" in nat_bank.keys() else 100000
+            max_loans = nat_bank["max_loans_per_user"] if "max_loans_per_user" in nat_bank.keys() else 1
+
+            if not (min_loan <= amount <= max_loan):
+                return await inter.response.send_message(
+                    f"❌ Сумма кредита Нацбанка должна быть в диапазоне от `{format_number(min_loan)}` до `{format_number(max_loan)}` R$.",
+                    ephemeral=True
+                )
+
+            if not (1 <= days <= 30):
+                return await inter.response.send_message("❌ Срок межбанковского кредита должен составлять от 1 до 30 дней.", ephemeral=True)
+
+            # Проверка лимита активных займов банка у Нацбанка
+            active_count = await get_bank_interbank_loans_count(borrower_bank_id, nat_bank_id)
+            if active_count >= max_loans:
+                return await inter.response.send_message(
+                    f"❌ Банк «{borrower_bank['name']}» уже имеет максимум активных кредитов в Нацбанке (`{active_count}` из `{max_loans}`).",
+                    ephemeral=True
+                )
+
+            # Проверка наличия ожидающей заявки
+            if await has_pending_interbank_loan_request(borrower_bank_id, nat_bank_id):
+                return await inter.response.send_message(
+                    "❌ У вашего банка уже есть заявка на межбанковский кредит, ожидающая рассмотрения руководством Нацбанка.",
+                    ephemeral=True
+                )
+
+            total_debt = int(amount * (1 + (nat_bank["interest_rate"] / 100)))
+            needs_approval = (threshold > 0 and amount >= threshold)
+
+            if needs_approval:
+                now = int(time.time())
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cursor = await db.execute("""
+                        INSERT INTO bank_loan_requests (
+                            user_id, bank_id, account_number, amount, days, status, created_at, borrower_bank_id
+                        )
+                        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                    """, (inter.author.id, nat_bank_id, f"КАЗНА {borrower_bank['name']}", amount, days, now, borrower_bank_id))
+                    req_id = cursor.lastrowid
+                    await db.commit()
+
+                # Отправляем карточку заявки в канал управления Нацбанком
+                nat_ctrl_ch = self.bot.get_channel(nat_bank["control_channel_id"]) if nat_bank["control_channel_id"] else None
+                if nat_ctrl_ch:
+                    req_embed = create_embed(
+                        title=f"🏛️ Межбанковская заявка на кредит #{req_id}",
+                        description=(
+                            f"**Банк-заемщик:** «{borrower_bank['name']}» (ID: `{borrower_bank_id}`)\n"
+                            f"**Представитель:** {inter.author.mention} (`{inter.author.id}`)\n"
+                            f"**Запрашиваемая сумма в казну:** `{format_number(amount)}` R$\n"
+                            f"**Срок:** `{days}` дн.\n"
+                            f"**Сумма к возврату:** `{format_number(total_debt)}` R$ ({nat_bank['interest_rate']}%)\n"
+                            f"**Резерв Нацбанка:** `{format_number(nat_bank['balance'])}` R$\n"
+                            f"**Дата подачи:** <t:{now}:F>"
+                        ),
+                        color=disnake.Color.gold()
+                    )
+                    req_view = disnake.ui.View(timeout=None)
+                    req_view.add_item(disnake.ui.Button(
+                        label="Одобрить",
+                        style=disnake.ButtonStyle.success,
+                        emoji="✅",
+                        custom_id=f"bank_loan_appr:{req_id}"
+                    ))
+                    req_view.add_item(disnake.ui.Button(
+                        label="Отклонить",
+                        style=disnake.ButtonStyle.danger,
+                        emoji="❌",
+                        custom_id=f"bank_loan_rejt:{req_id}"
+                    ))
+                    try:
+                        owner_ping = f"<@{nat_bank['owner_id']}> " if nat_bank["owner_id"] else ""
+                        msg = await nat_ctrl_ch.send(content=f"🔔 {owner_ping}Новая заявка на межбанковский кредит!", embed=req_embed, view=req_view)
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute("UPDATE bank_loan_requests SET message_id = ? WHERE id = ?", (msg.id, req_id))
+                            await db.commit()
+                    except Exception:
+                        pass
+
+                return await inter.response.send_message(
+                    f"✅ Заявка `#{req_id}` на межбанковский кредит `{format_number(amount)}` R$ направлена руководству Национального банка. Ожидайте решения.",
+                    ephemeral=True
+                )
+
+            # Если порог не превышен — моментальная выдача из резерва Нацбанка в казну коммерческого банка
+            if nat_bank["balance"] < amount:
+                return await inter.response.send_message(
+                    f"❌ В резервах Национального банка недостаточно средств для моментальной выдачи (в наличии `{format_number(nat_bank['balance'])}` R$).",
+                    ephemeral=True
+                )
+
+            now = int(time.time())
+            next_due = now + (days * 86400)
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("UPDATE banks SET balance = balance - ? WHERE id = ?", (amount, nat_bank_id))
+                await db.execute("UPDATE banks SET balance = balance + ? WHERE id = ?", (amount, borrower_bank_id))
+                await db.execute("""
+                    INSERT INTO bank_loans (
+                        user_id, bank_id, account_number, original_amount,
+                        total_debt, remaining_debt, period_payment, created_at, next_payment_time, is_closed, borrower_bank_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                """, (inter.author.id, nat_bank_id, f"КАЗНА {borrower_bank['name']}", amount, total_debt, total_debt, total_debt, now, next_due, borrower_bank_id))
+                await db.commit()
+
+            # Логируем операцию
+            await self.bank_money_logger(
+                bank_id=nat_bank_id,
+                op_type="credit",
+                user1_id=inter.author.id,
+                account1=f"КАЗНА {borrower_bank['name']}",
+                amount=amount,
+                extra=f"Межбанковский кредит банку «{borrower_bank['name']}» (автовыдача). Долг: {format_number(total_debt)} R$ на {days} дн."
+            )
+            await self.bank_money_logger(
+                bank_id=borrower_bank_id,
+                op_type="deposit",
+                user1_id=inter.author.id,
+                account1="КАЗНА",
+                amount=amount,
+                extra=f"Кредит от Нацбанка «{nat_bank['name']}». Поступило в казну: {format_number(amount)} R$."
+            )
+
+            # Обновляем обе панели управления
+            for b_id in (borrower_bank_id, nat_bank_id):
+                b_data = await get_bank(b_id)
+                if b_data and b_data["control_channel_id"] and b_data["control_message_id"]:
+                    ch = self.bot.get_channel(b_data["control_channel_id"])
+                    if ch:
+                        try:
+                            msg = await ch.fetch_message(b_data["control_message_id"])
+                            c = await self.build_bank_control_components(b_id)
+                            await msg.edit(components=c)
+                        except Exception:
+                            pass
+
+            await inter.response.send_message(
+                f"✅ Межбанковский кредит на сумму `{format_number(amount)}` R$ успешно выдан и зачислен в казну банка «{borrower_bank['name']}»!\n"
+                f"• Долг перед Нацбанком: `{format_number(total_debt)}` R$\n"
+                f"• Срок возврата: до <t:{next_due}:F> (<t:{next_due}:R>).",
+                ephemeral=True
+            )
+
+        # 5. Погашение межбанковского кредита из казны
+        elif custom_id.startswith("modal:interbank_pay_confirm:"):
+            _, _, borrower_bank_id_str, loan_id_str = custom_id.split(":")
+            borrower_bank_id = int(borrower_bank_id_str)
+            loan_id = int(loan_id_str)
+
+            loan = await get_loan_by_id(loan_id)
+            if not loan or loan["borrower_bank_id"] != borrower_bank_id or loan["is_closed"]:
+                return await inter.response.send_message("❌ Кредит не найден или уже закрыт.", ephemeral=True)
+
+            borrower_bank = await get_bank(borrower_bank_id)
+            lender_bank = await get_bank(loan["bank_id"])
+            if not borrower_bank or not lender_bank:
+                return await inter.response.send_message("❌ Данные банков не найдены.", ephemeral=True)
+
+            raw_amount = inter.text_values.get("pay_amount", "").strip().replace(" ", "")
+            if not raw_amount.isdigit():
+                return await inter.response.send_message("❌ Сумма платежа должна быть положительным числом.", ephemeral=True)
+
+            pay_amount = int(raw_amount)
+            if pay_amount <= 0:
+                return await inter.response.send_message("❌ Сумма должна быть больше 0.", ephemeral=True)
+
+            pay_amount = min(pay_amount, loan["remaining_debt"])
+
+            if borrower_bank["balance"] < pay_amount:
+                return await inter.response.send_message(
+                    f"❌ В казне банка недостаточно средств для погашения! В казне: `{format_number(borrower_bank['balance'])}` R$, требуется: `{format_number(pay_amount)}` R$.",
+                    ephemeral=True
+                )
+
+            new_remaining = loan["remaining_debt"] - pay_amount
+            is_closed = (new_remaining <= 0)
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("UPDATE banks SET balance = balance - ? WHERE id = ?", (pay_amount, borrower_bank_id))
+                await db.execute("UPDATE banks SET balance = balance + ? WHERE id = ?", (pay_amount, lender_bank["id"]))
+                await db.execute(
+                    "UPDATE bank_loans SET remaining_debt = ?, is_closed = ? WHERE id = ?",
+                    (new_remaining, int(is_closed), loan_id)
+                )
+                await db.commit()
+
+            # Логирование
+            await self.bank_money_logger(
+                bank_id=borrower_bank_id,
+                op_type="withdraw",
+                user1_id=inter.author.id,
+                account1="КАЗНА",
+                amount=pay_amount,
+                extra=f"Платеж по кредиту #{loan_id} в Нацбанк «{lender_bank['name']}». Остаток долга: {format_number(new_remaining)} R$"
+            )
+            await self.bank_money_logger(
+                bank_id=lender_bank["id"],
+                op_type="deposit",
+                user1_id=inter.author.id,
+                account1=f"КАЗНА {borrower_bank['name']}",
+                amount=pay_amount,
+                extra=f"Поступление оплаты по межбанковскому кредиту #{loan_id} от «{borrower_bank['name']}». Сумма: {format_number(pay_amount)} R$"
+            )
+
+            # Обновляем панели управления банков
+            for b_id in (borrower_bank_id, lender_bank["id"]):
+                b_data = await get_bank(b_id)
+                if b_data and b_data["control_channel_id"] and b_data["control_message_id"]:
+                    ch = self.bot.get_channel(b_data["control_channel_id"])
+                    if ch:
+                        try:
+                            msg = await ch.fetch_message(b_data["control_message_id"])
+                            c = await self.build_bank_control_components(b_id)
+                            await msg.edit(components=c)
+                        except Exception:
+                            pass
+
+            close_status = "\n🎉 **Межбанковский кредит полностью закрыт!**" if is_closed else f"\nОстаток долга: `{format_number(new_remaining)}` R$."
+            await inter.response.send_message(
+                f"✅ Успешно выплачено `{format_number(pay_amount)}` R$ из казны банка в счет погашения кредита #{loan_id}!{close_status}",
+                ephemeral=True
+            )
+
 
     @commands.Cog.listener("on_dropdown")
     async def handle_bank_dropdowns(self, inter: disnake.MessageInteraction):
+        if inter.component.custom_id.startswith("select:interbank_pay_loan:"):
+            borrower_bank_id = int(inter.component.custom_id.split(":")[2])
+            loan_id = int(inter.values[0])
+            loan = await get_loan_by_id(loan_id)
+            if not loan or loan["borrower_bank_id"] != borrower_bank_id or loan["is_closed"]:
+                return await inter.response.send_message("❌ Кредит не найден или уже погашен.", ephemeral=True)
+
+            modal = disnake.ui.Modal(
+                title=f"Оплата кредита #{loan_id}",
+                custom_id=f"modal:interbank_pay_confirm:{borrower_bank_id}:{loan_id}",
+                components=[
+                    disnake.ui.TextInput(
+                        label=f"Сумма списания (Долг: {format_number(loan['remaining_debt'])} R$)",
+                        placeholder=str(loan["remaining_debt"]),
+                        custom_id="pay_amount",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=12
+                    )
+                ]
+            )
+            return await inter.response.send_modal(modal=modal)
+
         if not inter.component.custom_id.startswith("bank_freeze_select:"):
             return
 
@@ -1343,6 +2336,49 @@ class BanksCog(commands.Cog):
 
         status_label = "заморожен 🔒" if new_status else "разблокирован 🟢"
         await inter.response.edit_message(content=f"✅ Лицевой счет `{acc_num}` теперь **{status_label}**.", view=None)
+
+    @commands.Cog.listener("on_dropdown")
+    async def handle_service_dropdowns(self, inter: disnake.MessageInteraction):
+        if inter.component.custom_id != "service_select:close_acc":
+            return
+
+        acc_num = inter.values[0]
+        account = await self.validate_account(inter, acc_num, check_owner=True, check_frozen=False)
+        if not account:
+            return
+
+        active_loans = await get_account_active_loans(acc_num)
+        if active_loans:
+            loan_ids = ", ".join([f"#{l['id']}" for l in active_loans])
+            return await inter.response.edit_message(
+                content=f"❌ Нельзя закрыть лицевой счет `{acc_num}`, пока на нем числятся непогашенные кредиты ({loan_ids})!",
+                embed=None,
+                view=None
+            )
+
+        embed = create_embed(
+            title="⚠️ Подтверждение закрытия счета",
+            description=(
+                f"Вы собираетесь закрыть счет `{acc_num}` в банке **«{account['bank_name']}»**.\n"
+                f"• Текущий баланс: `{format_number(account['balance'])}` R$\n"
+                f"• При закрытии все оставшиеся средства будут выплачены вам наличными.\n\n"
+                f"Вы уверены?"
+            ),
+            color=disnake.Color.red()
+        )
+        view = disnake.ui.View(timeout=60)
+        view.add_item(disnake.ui.Button(
+            label="Да, закрыть счет",
+            style=disnake.ButtonStyle.danger,
+            emoji="🗑️",
+            custom_id=f"confirm_close_acc:{acc_num}"
+        ))
+        view.add_item(disnake.ui.Button(
+            label="Отмена",
+            style=disnake.ButtonStyle.secondary,
+            custom_id="confirm_acc_cancel"
+        ))
+        await inter.response.edit_message(content=None, embed=embed, view=view)
 
 
 

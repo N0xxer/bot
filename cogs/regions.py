@@ -386,7 +386,6 @@ class RegionsCog(commands.Cog):
 
 
 
-    # --- РАСХОД БЮДЖЕТА РЕГИОНА (USE) ---
     @region_money_group.sub_command(
         name="use",
         description="Списать средства из бюджета региона на нужды субъекта"
@@ -447,7 +446,6 @@ class RegionsCog(commands.Cog):
 
 
 
-    # --- ПОПОЛНЕНИЕ БЮДЖЕТА РЕГИОНА (DEPOSIT) ---
     @region_money_group.sub_command(
         name="deposit",
         description="Внести средства с личного баланса в бюджет региона"
@@ -509,7 +507,6 @@ class RegionsCog(commands.Cog):
 
 
 
-    # --- ВЫВОД ИЗ БЮДЖЕТА РЕГИОНА (WITHDRAW) ---
     @region_money_group.sub_command(
         name="withdraw",
         description="Вывести средства из бюджета региона на личный баланс"

@@ -524,7 +524,7 @@ class CompaniesCog(commands.Cog):
     async def company_money_group(self, inter: disnake.ApplicationCommandInteraction):
         pass
 
-    # --- ПЕРЕВОД МЕЖДУ КОМПАНИЯМИ (PAY) ---
+
     @company_money_group.sub_command(
         name="pay",
         description="Перевести средства со счета своей компании на счет другой"
@@ -623,7 +623,6 @@ class CompaniesCog(commands.Cog):
 
 
 
-    # --- РАСХОД СРЕДСТВ НА НУЖДЫ КОМПАНИИ (USE) ---
     @company_money_group.sub_command(
         name="use",
         description="Списать средства со счета компании на расходы предприятия"
@@ -635,7 +634,7 @@ class CompaniesCog(commands.Cog):
         сумма: int = commands.Param(description="Сумма списания", min_value=1),
         цель: str = commands.Param(description="Цель/причина расходов")
     ):
-        await inter.response.defer(ephemeral=True)
+        await inter.response.defer()
 
         company = await get_company_by_id(компания)
         if not company:
@@ -679,7 +678,6 @@ class CompaniesCog(commands.Cog):
 
 
 
-    # --- ПОПОЛНЕНИЕ БАЛАНСА (DEPOSIT) ---
     @company_money_group.sub_command(
         name="deposit",
         description="Внести средства с личного баланса в казну компании"
@@ -736,7 +734,6 @@ class CompaniesCog(commands.Cog):
 
 
 
-    # --- ВЫВОД СРЕДСТВ (WITHDRAW) ---
     @company_money_group.sub_command(
         name="withdraw",
         description="Вывести средства из казны компании на личный баланс"
