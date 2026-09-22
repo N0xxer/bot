@@ -1,3 +1,4 @@
+import time
 from typing import Any, Optional, Dict
 import aiosqlite
 import os
@@ -344,7 +345,11 @@ async def init_bank_db():
                 max_loan_amount INTEGER NOT NULL DEFAULT 1000000,
                 loan_approval_threshold INTEGER NOT NULL DEFAULT 100000,
                 max_loans_per_user INTEGER NOT NULL DEFAULT 1,
-                is_national BOOLEAN NOT NULL DEFAULT 0
+                is_national BOOLEAN NOT NULL DEFAULT 0,
+                max_accounts_per_user INTEGER NOT NULL DEFAULT 3,
+                deposits_enabled BOOLEAN NOT NULL DEFAULT 0,
+                deposit_interest_rate REAL NOT NULL DEFAULT 3.0,
+                min_deposit_amount INTEGER NOT NULL DEFAULT 1000
             )
         """)
 
@@ -357,7 +362,11 @@ async def init_bank_db():
             "max_loan_amount": "INTEGER NOT NULL DEFAULT 1000000",
             "loan_approval_threshold": "INTEGER NOT NULL DEFAULT 100000",
             "max_loans_per_user": "INTEGER NOT NULL DEFAULT 1",
-            "is_national": "BOOLEAN NOT NULL DEFAULT 0"
+            "is_national": "BOOLEAN NOT NULL DEFAULT 0",
+            "max_accounts_per_user": "INTEGER NOT NULL DEFAULT 3",
+            "deposits_enabled": "BOOLEAN NOT NULL DEFAULT 0",
+            "deposit_interest_rate": "REAL NOT NULL DEFAULT 3.0",
+            "min_deposit_amount": "INTEGER NOT NULL DEFAULT 1000"
         }
         for col_name, col_def in bank_migrations.items():
             if col_name not in existing_cols:
@@ -371,10 +380,17 @@ async def init_bank_db():
                 balance INTEGER NOT NULL DEFAULT 0,
                 is_frozen BOOLEAN NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
+                account_name TEXT DEFAULT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(user_id),
                 FOREIGN KEY (bank_id) REFERENCES banks(id)
             )
         """)
+        # Миграция для bank_accounts (account_name)
+        async with db.execute("PRAGMA table_info(bank_accounts)") as cursor:
+            existing_acc_cols = {row[1] for row in await cursor.fetchall()}
+        if "account_name" not in existing_acc_cols:
+            await db.execute("ALTER TABLE bank_accounts ADD COLUMN account_name TEXT DEFAULT NULL")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bank_loans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -421,6 +437,37 @@ async def init_bank_db():
             existing_req_cols = {row[1] for row in await cursor.fetchall()}
         if "borrower_bank_id" not in existing_req_cols:
             await db.execute("ALTER TABLE bank_loan_requests ADD COLUMN borrower_bank_id INTEGER DEFAULT NULL")
+
+        # Таблица депозитов
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bank_deposits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                bank_id INTEGER NOT NULL,
+                account_number TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                interest_rate REAL NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_payout_time INTEGER NOT NULL,
+                is_closed BOOLEAN NOT NULL DEFAULT 0,
+                FOREIGN KEY (account_number) REFERENCES bank_accounts(account_number),
+                FOREIGN KEY (bank_id) REFERENCES banks(id)
+            )
+        """)
+
+        # Таблица чёрного списка банков
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bank_blacklist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bank_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                added_by INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(bank_id, user_id),
+                FOREIGN KEY (bank_id) REFERENCES banks(id)
+            )
+        """)
 
         await db.commit()
 
@@ -638,4 +685,129 @@ async def has_pending_interbank_loan_request(bank_id: int, lender_bank_id: int) 
             "SELECT 1 FROM bank_loan_requests WHERE borrower_bank_id = ? AND bank_id = ? AND status = 'pending' LIMIT 1",
             (bank_id, lender_bank_id)
         ) as cursor:
-            return bool(await cursor.fetchone())
+            return bool(await cursor.fetchone())
+
+async def rename_bank_account(account_number: str, new_name: Optional[str]) -> bool:
+    """Изменить название (метку) счета в банке."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE bank_accounts SET account_name = ? WHERE account_number = ?",
+            (new_name, account_number)
+        )
+        await db.commit()
+        return True
+
+async def get_user_bank_accounts_count(user_id: int, bank_id: int) -> int:
+    """Получить количество открытых счетов пользователя в конкретном банке."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM bank_accounts WHERE user_id = ? AND bank_id = ?",
+            (user_id, bank_id)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+# ================= ЧЁРНЫЙ СПИСОК БАНКА =================
+
+async def add_to_bank_blacklist(bank_id: int, user_id: int, reason: str, added_by: int) -> bool:
+    """Добавить пользователя в чёрный список банка."""
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO bank_blacklist (bank_id, user_id, reason, added_by, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(bank_id, user_id) DO UPDATE SET
+                reason = excluded.reason,
+                added_by = excluded.added_by,
+                created_at = excluded.created_at
+        """, (bank_id, user_id, reason, added_by, now))
+        await db.commit()
+        return True
+
+async def remove_from_bank_blacklist(bank_id: int, user_id: int) -> bool:
+    """Удалить пользователя из чёрного списка банка."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM bank_blacklist WHERE bank_id = ? AND user_id = ?",
+            (bank_id, user_id)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+async def get_user_bank_blacklist_entry(bank_id: int, user_id: int):
+    """Проверить, находится ли пользователь в ЧС банка. Возвращает запись или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM bank_blacklist WHERE bank_id = ? AND user_id = ?",
+            (bank_id, user_id)
+        ) as cursor:
+            return await cursor.fetchone()
+
+async def get_bank_blacklist(bank_id: int):
+    """Получить список пользователей в ЧС банка."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM bank_blacklist WHERE bank_id = ? ORDER BY created_at DESC",
+            (bank_id,)
+        ) as cursor:
+            return await cursor.fetchall()
+
+# ================= ДЕПОЗИТЫ БАНКА =================
+
+async def create_bank_deposit(user_id: int, bank_id: int, account_number: str, amount: int, interest_rate: float) -> int:
+    """Открыть депозит."""
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            INSERT INTO bank_deposits (user_id, bank_id, account_number, amount, interest_rate, created_at, last_payout_time, is_closed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+        """, (user_id, bank_id, account_number, amount, interest_rate, now, now))
+        deposit_id = cursor.lastrowid
+        await db.commit()
+        return deposit_id
+
+async def get_user_deposits(user_id: int, only_active: bool = True):
+    """Получить депозиты пользователя."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        clause = "AND d.is_closed = 0" if only_active else ""
+        async with db.execute(f"""
+            SELECT d.*, b.name as bank_name
+            FROM bank_deposits d
+            JOIN banks b ON d.bank_id = b.id
+            WHERE d.user_id = ? {clause}
+            ORDER BY d.created_at DESC
+        """, (user_id,)) as cursor:
+            return await cursor.fetchall()
+
+async def get_bank_deposits_total(bank_id: int) -> int:
+    """Сумма активных депозитов банка."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT SUM(amount) FROM bank_deposits WHERE bank_id = ? AND is_closed = 0",
+            (bank_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else 0
+
+async def get_deposit_by_id(deposit_id: int):
+    """Получить депозит по ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT d.*, b.name as bank_name, b.balance as bank_balance, b.log_channel_id
+            FROM bank_deposits d
+            JOIN banks b ON d.bank_id = b.id
+            WHERE d.id = ?
+        """, (deposit_id,)) as cursor:
+            return await cursor.fetchone()
+
+async def close_bank_deposit(deposit_id: int) -> bool:
+    """Закрыть депозит."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE bank_deposits SET is_closed = 1 WHERE id = ?", (deposit_id,))
+        await db.commit()
+        return True
+

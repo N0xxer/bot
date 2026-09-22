@@ -30,7 +30,18 @@ from functions.db_helpers import (
     set_national_bank,
     get_bank_active_interbank_loans,
     get_bank_interbank_loans_count,
-    has_pending_interbank_loan_request
+    has_pending_interbank_loan_request,
+    rename_bank_account,
+    get_user_bank_accounts_count,
+    add_to_bank_blacklist,
+    remove_from_bank_blacklist,
+    get_user_bank_blacklist_entry,
+    get_bank_blacklist,
+    create_bank_deposit,
+    get_user_deposits,
+    get_bank_deposits_total,
+    get_deposit_by_id,
+    close_bank_deposit
 )
 from functions.utils import ensure_admin, ensure_user_registered, notification_send, create_embed, format_number, MAIN_COLOR
 
@@ -44,12 +55,14 @@ class BanksCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.check_overdue_loans.start()
+        self.process_deposit_payouts.start()
 
     async def cog_load(self):
         await init_bank_db()
 
     def cog_unload(self):
         self.check_overdue_loans.cancel()
+        self.process_deposit_payouts.cancel()
 
     @tasks.loop(minutes=30)
     async def check_overdue_loans(self):
@@ -113,6 +126,59 @@ class BanksCog(commands.Cog):
 
     @check_overdue_loans.before_loop
     async def before_check_overdue_loans(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def process_deposit_payouts(self):
+        """Периодическое начисление процентов по вкладам (раз в сутки)."""
+        now = int(time.time())
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT d.*, b.name as bank_name, b.balance as bank_balance
+                FROM bank_deposits d
+                JOIN banks b ON d.bank_id = b.id
+                WHERE d.is_closed = 0 AND d.last_payout_time <= ?
+            """, (now - 86400,)) as cursor:
+                deposits = await cursor.fetchall()
+
+            for dep in deposits:
+                # Начисляем процент от суммы депозита
+                profit = max(1, int(dep["amount"] * (dep["interest_rate"] / 100)))
+                # Проверяем, есть ли у банка средства в казне на выплату процентов
+                if dep["bank_balance"] >= profit:
+                    await db.execute("UPDATE banks SET balance = balance - ? WHERE id = ?", (profit, dep["bank_id"]))
+                    await db.execute("UPDATE bank_accounts SET balance = balance + ? WHERE account_number = ?", (profit, dep["account_number"]))
+                    await db.execute("UPDATE bank_deposits SET last_payout_time = ? WHERE id = ?", (now, dep["id"]))
+
+                    await self.bank_money_logger(
+                        bank_id=dep["bank_id"],
+                        op_type="withdraw",
+                        user1_id=dep["user_id"],
+                        account1=dep["account_number"],
+                        amount=profit,
+                        extra=f"Выплата процентов по вкладу #{dep['id']} ({dep['interest_rate']}%): +{format_number(profit)} R$"
+                    )
+
+                    user = self.bot.get_user(dep["user_id"])
+                    if user:
+                        embed = create_embed(
+                            title="📈 Доход по вкладу",
+                            description=(
+                                f"Вам начислены проценты по вкладу **#{dep['id']}** в банке «{dep['bank_name']}»!\n\n"
+                                f"• Начислено: `+{format_number(profit)}` R$ ({dep['interest_rate']}%)\n"
+                                f"• Средства зачислены на счет: `{dep['account_number']}`"
+                            ),
+                            color=disnake.Color.green()
+                        )
+                        try:
+                            await user.send(embed=embed)
+                        except disnake.Forbidden:
+                            pass
+            await db.commit()
+
+    @process_deposit_payouts.before_loop
+    async def before_process_deposit_payouts(self):
         await self.bot.wait_until_ready()
 
 
@@ -229,8 +295,14 @@ class BanksCog(commands.Cog):
         max_loan = bank["max_loan_amount"] if "max_loan_amount" in bank.keys() else 1000000
         threshold = bank["loan_approval_threshold"] if "loan_approval_threshold" in bank.keys() else 100000
         max_user_loans = bank["max_loans_per_user"] if "max_loans_per_user" in bank.keys() else 1
+        max_accs = bank["max_accounts_per_user"] if "max_accounts_per_user" in bank.keys() else 3
         threshold_text = f"`{format_number(threshold)}` R$" if threshold > 0 else "Отключено (авто-выдача)"
         is_nat = bool(bank["is_national"] if "is_national" in bank.keys() else False)
+
+        dep_enabled = bool(bank["deposits_enabled"] if "deposits_enabled" in bank.keys() else False)
+        dep_rate = bank["deposit_interest_rate"] if "deposit_interest_rate" in bank.keys() else 3.0
+        dep_status_text = f"🟢 Включены (`{dep_rate}%` в сутки)" if dep_enabled else "🔴 Выключены"
+        deposits_total = await get_bank_deposits_total(bank_id)
 
         status_badge = "\n🌟 **СТАТУС: НАЦИОНАЛЬНЫЙ БАНК РЕЗЕНДИИ** 🏛️" if is_nat else ""
         loan_target_desc = "межбанковские кредиты" if is_nat else "кредитование граждан"
@@ -249,7 +321,9 @@ class BanksCog(commands.Cog):
             f"• **Кредитная ставка:** `{bank['interest_rate']}%`\n"
             f"• **Лимиты ({loan_target_desc}):** от `{format_number(min_loan)}` до `{format_number(max_loan)}` R$\n"
             f"• **Порог одобрения:** {threshold_text}\n"
-            f"• **Лимит кредитов на заемщика:** `{max_user_loans}` шт.\n"
+            f"• **Лимит кредитов на клиента:** `{max_user_loans}` шт.\n"
+            f"• **Лимит счетов на человека:** `{max_accs}` шт.\n"
+            f"• **Вклады (Депозиты):** {dep_status_text} (В обороте: `{format_number(deposits_total)}` R$)\n"
             f"• **Активные выданные займы:** `{format_number(active_loans_total)}` R${interbank_info}\n"
         )
 
@@ -261,7 +335,7 @@ class BanksCog(commands.Cog):
                 custom_id=f"bank_ctrl:edit:{bank_id}"
             ),
             disnake.ui.Button(
-                label="Лимиты кредитов",
+                label="Лимиты",
                 emoji="📊",
                 style=disnake.ButtonStyle.secondary,
                 custom_id=f"bank_ctrl:limits:{bank_id}"
@@ -273,7 +347,7 @@ class BanksCog(commands.Cog):
                 custom_id=f"bank_ctrl:freeze:{bank_id}"
             ),
             disnake.ui.Button(
-                label="Казна банка",
+                label="Казна",
                 emoji="💰",
                 style=disnake.ButtonStyle.success,
                 custom_id=f"bank_ctrl:balance:{bank_id}"
@@ -286,13 +360,28 @@ class BanksCog(commands.Cog):
             )
         )
 
-        rows = [disnake.ui.Container(disnake.ui.TextDisplay(content=content)), row1]
+        row2 = disnake.ui.ActionRow(
+            disnake.ui.Button(
+                label="Депозиты",
+                emoji="📈",
+                style=disnake.ButtonStyle.primary,
+                custom_id=f"bank_ctrl:deposits:{bank_id}"
+            ),
+            disnake.ui.Button(
+                label="Чёрный список",
+                emoji="🚫",
+                style=disnake.ButtonStyle.danger,
+                custom_id=f"bank_ctrl:blacklist:{bank_id}"
+            )
+        )
 
-        # Для коммерческих банков добавляем второй ряд с кнопками межбанковского кредитования
+        rows = [disnake.ui.Container(disnake.ui.TextDisplay(content=content)), row1, row2]
+
+        # Для коммерческих банков добавляем третий ряд с кнопками межбанковского кредитования
         if not is_nat:
             nat_bank = await get_national_bank()
             if nat_bank:
-                row2_buttons = [
+                row3_buttons = [
                     disnake.ui.Button(
                         label="Кредит в Нацбанке",
                         emoji="🏛️",
@@ -301,7 +390,7 @@ class BanksCog(commands.Cog):
                     )
                 ]
                 if interbank_debt_total > 0:
-                    row2_buttons.append(
+                    row3_buttons.append(
                         disnake.ui.Button(
                             label="Погасить долг Нацбанку",
                             emoji="💸",
@@ -309,16 +398,21 @@ class BanksCog(commands.Cog):
                             custom_id=f"bank_ctrl:interbank_pay:{bank_id}"
                         )
                     )
-                rows.append(disnake.ui.ActionRow(*row2_buttons))
+                rows.append(disnake.ui.ActionRow(*row3_buttons))
 
         return rows
 
     async def user_accounts_autocomp(self, inter: disnake.ApplicationCommandInteraction, user_input: str):
         accounts = await get_user_accounts(inter.author.id)
-        return {
-            f"{acc['bank_name']} | {acc['account_number']} ({format_number(acc['balance'])} R$)": acc['account_number']
-            for acc in accounts if user_input.lower() in acc['account_number'].lower() or user_input.lower() in acc['bank_name'].lower()
-        }
+        res = {}
+        for acc in accounts:
+            name_part = f" («{acc['account_name']}»)" if acc.get("account_name") else ""
+            label = f"{acc['bank_name']} | {acc['account_number']}{name_part} ({format_number(acc['balance'])} R$)"
+            if (user_input.lower() in acc['account_number'].lower() or
+                user_input.lower() in acc['bank_name'].lower() or
+                (acc.get("account_name") and user_input.lower() in acc['account_name'].lower())):
+                res[label[:100]] = acc['account_number']
+        return res
 
 
     async def bank_autocomplete(self, inter: disnake.ApplicationCommandInteraction, user_input: str):
@@ -571,6 +665,46 @@ class BanksCog(commands.Cog):
         await inter.edit_original_message(content=f"✅ Банк **«{target_bank['name']}»** (ID: `{bank_id}`) успешно назначен **Национальным банком Резендии**.")
 
 
+    @bank_group.sub_command(
+        name="set_max_accounts",
+        description="Установить максимальное число счетов на одного человека в банке"
+    )
+    async def bank_set_max_accounts(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        банк: str = commands.Param(description="Выберите банк", autocomplete=bank_autocomplete),
+        лимит: int = commands.Param(description="Максимум счетов на человека (от 1 до 20)", ge=1, le=20)
+    ):
+        await inter.response.defer(ephemeral=True)
+        bank_id = int(банк)
+        target_bank = await get_bank(bank_id)
+        if not target_bank:
+            return await inter.edit_original_message(content="❌ Указанный банк не найден.")
+
+        is_owner = (target_bank["owner_id"] == inter.author.id)
+        is_admin = inter.author.guild_permissions.administrator
+        if not (is_owner or is_admin):
+            return await inter.edit_original_message(content="⛔ Настроить лимит счетов может только владелец данного банка или администратор.")
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE banks SET max_accounts_per_user = ? WHERE id = ?", (лимит, bank_id))
+            await db.commit()
+
+        # Обновляем карточку банка
+        comps = await self.build_bank_control_components(bank_id)
+        channel = self.bot.get_channel(target_bank["control_channel_id"])
+        if channel and target_bank["control_message_id"]:
+            try:
+                msg = await channel.fetch_message(target_bank["control_message_id"])
+                await msg.edit(components=comps)
+            except Exception:
+                pass
+
+        await inter.edit_original_message(
+            content=f"✅ В банке **«{target_bank['name']}»** установлен лимит счетов: не более **{лимит}** сч./чел."
+        )
+
+
     @bank_group.sub_command(name="accounts", description="Посмотреть банковские счета")
     async def bank_accounts_view(
         self,
@@ -590,9 +724,10 @@ class BanksCog(commands.Cog):
         else:
             for acc in accounts:
                 frozen_str = "да" if acc["is_frozen"] else "нет"
+                name_str = f"\nНазвание: {acc['account_name']}" if acc.get("account_name") else ""
                 block = (
                     f"```Счет в банке {acc['bank_name']}\n"
-                    f"Номер: {acc['account_number']}\n"
+                    f"Номер: {acc['account_number']}{name_str}\n"
                     f"Баланс: {format_number(acc['balance'])} R$\n"
                     f"Заморожен: {frozen_str}```"
                 )
@@ -1043,13 +1178,13 @@ class BanksCog(commands.Cog):
                     )
                 ),
                 disnake.ui.Label(
-                    text="Сумма кредита (100 - 1 000 000 R$)",
+                    text="Сумма кредита (в R$)",
                     component=disnake.ui.TextInput(
                         custom_id="loan_amount",
                         placeholder="Например: 50000",
                         style=disnake.TextInputStyle.short,
-                        min_length=3,
-                        max_length=7,
+                        min_length=1,
+                        max_length=15,
                         required=True
                     )
                 ),
@@ -1060,7 +1195,7 @@ class BanksCog(commands.Cog):
                         placeholder="Например: 7",
                         style=disnake.TextInputStyle.short,
                         min_length=1,
-                        max_length=2,
+                        max_length=4,
                         required=True
                     )
                 )
@@ -1108,6 +1243,25 @@ class BanksCog(commands.Cog):
         if action == "open_account":
             bank_id = int(inter.values.get("open_bank_id")[0])
             bank = await get_bank(bank_id)
+            if not bank:
+                return await inter.response.send_message("❌ Банк не найден.", ephemeral=True)
+
+            # Проверка чёрного списка банка
+            bl_entry = await get_user_bank_blacklist_entry(bank_id, inter.author.id)
+            if bl_entry:
+                return await inter.response.send_message(
+                    f"⛔ **Отказано в обслуживании!**\nВы внесены в **чёрный список** банка «{bank['name']}».\n**Причина:** {bl_entry['reason']}",
+                    ephemeral=True
+                )
+
+            # Проверка лимита счетов на одного человека в этом банке
+            max_accs = bank["max_accounts_per_user"] if "max_accounts_per_user" in bank.keys() else 3
+            user_acc_count = await get_user_bank_accounts_count(inter.author.id, bank_id)
+            if user_acc_count >= max_accs:
+                return await inter.response.send_message(
+                    f"❌ В банке «{bank['name']}» действует ограничение: не более **{max_accs}** счетов на одного человека. У вас уже открыто: **{user_acc_count}**.",
+                    ephemeral=True
+                )
 
             embed = create_embed(
                 title="Подтверждение открытия счета",
@@ -1122,8 +1276,8 @@ class BanksCog(commands.Cog):
 
         elif action == "take_loan":
             bank_id = int(inter.values.get("loan_bank_id")[0])
-            raw_amount = inter.text_values.get("loan_amount", "").strip()
-            raw_days = inter.text_values.get("loan_days", "").strip()
+            raw_amount = inter.text_values.get("loan_amount", "").strip().replace(" ", "")
+            raw_days = inter.text_values.get("loan_days", "").strip().replace(" ", "")
 
             if not raw_amount.isdigit() or not raw_days.isdigit():
                 return await inter.response.send_message("❌ Сумма и срок должны быть числами.", ephemeral=True, delete_after=10)
@@ -1140,6 +1294,15 @@ class BanksCog(commands.Cog):
             if is_national:
                 return await inter.response.send_message(
                     "❌ Национальный банк Резендии кредитует исключительно коммерческие банки государства. Кредитование физических лиц запрещено.",
+                    ephemeral=True,
+                    delete_after=15
+                )
+
+            # Проверка чёрного списка банка (запрет на взятие кредитов)
+            bl_entry = await get_user_bank_blacklist_entry(bank_id, inter.author.id)
+            if bl_entry:
+                return await inter.response.send_message(
+                    f"⛔ **Отказано в кредитовании!**\nВы находитесь в **чёрном списке** банка «{bank['name']}».\n**Причина:** {bl_entry['reason']}",
                     ephemeral=True,
                     delete_after=15
                 )
@@ -1243,6 +1406,28 @@ class BanksCog(commands.Cog):
         if custom_id.startswith("confirm_acc_open:"):
             bank_id = int(custom_id.split(":")[1])
             bank = await get_bank(bank_id)
+            if not bank:
+                return await inter.response.edit_message(content="❌ Банк не найден.", embed=None, view=None)
+
+            # Проверка ЧС в момент подтверждения
+            bl_entry = await get_user_bank_blacklist_entry(bank_id, inter.author.id)
+            if bl_entry:
+                return await inter.response.edit_message(
+                    content=f"⛔ Операция отклонена. Вы внесены в чёрный список банка «{bank['name']}» (Причина: {bl_entry['reason']}).",
+                    embed=None,
+                    view=None
+                )
+
+            # Проверка лимита количества счетов
+            max_accs = bank["max_accounts_per_user"] if "max_accounts_per_user" in bank.keys() else 3
+            user_acc_count = await get_user_bank_accounts_count(inter.author.id, bank_id)
+            if user_acc_count >= max_accs:
+                return await inter.response.edit_message(
+                    content=f"❌ Превышен лимит счетов в банке «{bank['name']}» ({user_acc_count} из {max_accs})!",
+                    embed=None,
+                    view=None
+                )
+
             acc_num = await generate_unique_account_number(bank_id)
             now = int(time.time())
 
