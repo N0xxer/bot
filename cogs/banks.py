@@ -422,6 +422,15 @@ class BanksCog(commands.Cog):
             for b in banks if user_input.lower() in b["name"].lower() or user_input in str(b["id"])
         }
 
+    async def user_deposits_autocomp(self, inter: disnake.ApplicationCommandInteraction, user_input: str):
+        deposits = await get_user_deposits(inter.author.id, only_active=True)
+        res = {}
+        for dep in deposits:
+            label = f"#{dep['id']} | {dep['bank_name']} ({format_number(dep['amount'])} R$, {dep['interest_rate']}%)"
+            if user_input.lower() in str(dep["id"]) or user_input.lower() in dep["bank_name"].lower():
+                res[label[:100]] = str(dep["id"])
+        return res
+
 
 
     # =========================================================
@@ -930,6 +939,92 @@ class BanksCog(commands.Cog):
         await inter.edit_original_message(embed=embed)
 
 
+    @bank_group.sub_command(name="deposit_list", description="Посмотреть ваши открытые вклады (депозиты)")
+    async def bank_deposit_list(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        пользователь: Optional[disnake.Member] = commands.Param(default=None, description="Чьи вклады посмотреть")
+    ):
+        target = пользователь or inter.author
+        if not await ensure_user_registered(inter, target.id):
+            return
+
+        await inter.response.defer(ephemeral=True)
+        deposits = await get_user_deposits(target.id, only_active=False)
+
+        lines = [f"## Вклады (депозиты) пользователя {target.mention}\n"]
+        if not deposits:
+            lines.append("```У пользователя нет активных или закрытых вкладов.```")
+        else:
+            for dep in deposits:
+                status_str = "🔴 Закрыт" if dep["is_closed"] else "🟢 Активен (начисление % каждые 24ч)"
+                daily_profit = max(1, int(dep["amount"] * (dep["interest_rate"] / 100)))
+                block = (
+                    f"```Вклад #{dep['id']} в банке «{dep['bank_name']}»\n"
+                    f"Тело вклада: {format_number(dep['amount'])} R$\n"
+                    f"Ставка: {dep['interest_rate']}% в сутки (~+{format_number(daily_profit)} R$/день)\n"
+                    f"Счет зачисления: {dep['account_number']}\n"
+                    f"Статус: {status_str}```"
+                )
+                lines.append(block)
+
+        await inter.edit_original_message(content="\n".join(lines))
+
+
+    @bank_group.sub_command(name="deposit_close", description="Закрыть вклад и вернуть средства на счет")
+    async def bank_deposit_close_cmd(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        вклад_id: str = commands.Param(description="Выберите вклад для закрытия", autocomplete=user_deposits_autocomp)
+    ):
+        if not await ensure_user_registered(inter, inter.author.id):
+            return
+
+        await inter.response.defer(ephemeral=True)
+        try:
+            dep_id = int(вклад_id)
+        except ValueError:
+            return await inter.edit_original_message(content="❌ Некорректный ID вклада.")
+
+        dep = await get_deposit_by_id(dep_id)
+        if not dep or dep["user_id"] != inter.author.id:
+            return await inter.edit_original_message(content="❌ Вклад не найден.")
+
+        if dep["is_closed"]:
+            return await inter.edit_original_message(content="ℹ️ Этот вклад уже закрыт.")
+
+        # Возвращаем тело депозита на счет
+        account = await get_account_by_number(dep["account_number"])
+        if not account or account["is_frozen"]:
+            return await inter.edit_original_message(
+                content=f"❌ Счет зачисления `{dep['account_number']}` заблокирован или отсутствует! Разблокируйте счет для вывода средств."
+            )
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE bank_accounts SET balance = balance + ? WHERE account_number = ?", (dep["amount"], dep["account_number"]))
+            await db.execute("UPDATE bank_deposits SET is_closed = 1 WHERE id = ?", (dep_id,))
+            await db.commit()
+
+        await self.bank_money_logger(
+            bank_id=dep["bank_id"],
+            op_type="deposit",
+            user1_id=inter.author.id,
+            account1=dep["account_number"],
+            amount=dep["amount"],
+            extra=f"Закрытие вклада #{dep_id}. Тело депозита ({format_number(dep['amount'])} R$) возвращено на счет {dep['account_number']}."
+        )
+
+        embed = create_embed(
+            title="📈 Вклад успешно закрыт",
+            description=(
+                f"Ваш вклад **#{dep_id}** в банке **«{dep['bank_name']}»** был успешно закрыт.\n\n"
+                f"💵 Тело вклада в размере `{format_number(dep['amount'])}` R$ возвращено на ваш счет `{dep['account_number']}`."
+            ),
+            color=disnake.Color.green()
+        )
+        await inter.edit_original_message(embed=embed)
+
+
 
     @commands.slash_command(
         name="send_bank_services_panel",
@@ -972,6 +1067,12 @@ class BanksCog(commands.Cog):
                     style=disnake.ButtonStyle.primary,
                     emoji="💰",
                     custom_id="service_btn:take_loan"
+                ),
+                disnake.ui.Button(
+                    label="Открыть вклад",
+                    style=disnake.ButtonStyle.primary,
+                    emoji="📈",
+                    custom_id="service_btn:open_deposit"
                 ),
                 disnake.ui.Button(
                     label="Закрыть счет",
@@ -1206,6 +1307,72 @@ class BanksCog(commands.Cog):
                 components=modal_components
             )
 
+        elif action == "open_deposit":
+            # Выбираем только банки, где включены депозиты
+            deposit_banks = [b for b in banks if b.get("deposits_enabled", 0)]
+            if not deposit_banks:
+                return await inter.response.send_message("❌ В настоящее время ни один банк не принимает вклады.", ephemeral=True)
+
+            user_accs = await get_user_accounts(inter.author.id)
+            active_accs = [a for a in user_accs if not a["is_frozen"]]
+            if not active_accs:
+                return await inter.response.send_message("❌ Для открытия вклада вам необходим активный лицевой счет в банке. Сначала откройте счет.", ephemeral=True)
+
+            dep_bank_options = [
+                disnake.SelectOption(
+                    label=b["name"][:100],
+                    value=str(b["id"]),
+                    description=f"Ставка: {b.get('deposit_interest_rate', 3.0)}% | Мин. вклад: {format_number(b.get('min_deposit_amount', 1000))} R$"[:100]
+                ) for b in deposit_banks[:25]
+            ]
+
+            acc_options = [
+                disnake.SelectOption(
+                    label=f"{a['account_number']} ({a['bank_name']})"[:100],
+                    value=a["account_number"],
+                    description=f"Баланс: {format_number(a['balance'])} R$"[:100]
+                ) for a in active_accs[:25]
+            ]
+
+            modal_components = [
+                disnake.ui.Label(
+                    text="Выберите банк для вклада",
+                    component=disnake.ui.StringSelect(
+                        custom_id="deposit_bank_id",
+                        placeholder="Банк для открытия депозита",
+                        options=dep_bank_options,
+                        min_values=1,
+                        max_values=1
+                    )
+                ),
+                disnake.ui.Label(
+                    text="Счет списания средств",
+                    component=disnake.ui.StringSelect(
+                        custom_id="deposit_acc_num",
+                        placeholder="Счет списания",
+                        options=acc_options,
+                        min_values=1,
+                        max_values=1
+                    )
+                ),
+                disnake.ui.Label(
+                    text="Сумма вклада (в R$)",
+                    component=disnake.ui.TextInput(
+                        custom_id="deposit_amount",
+                        placeholder="Например: 50000",
+                        style=disnake.TextInputStyle.short,
+                        min_length=1,
+                        max_length=15,
+                        required=True
+                    )
+                )
+            ]
+            await inter.response.send_modal(
+                title="Открытие вклада (депозита)",
+                custom_id="modal:bank_service:open_deposit",
+                components=modal_components
+            )
+
         elif action == "close_account":
             user_accs = await get_user_accounts(inter.author.id)
             if not user_accs:
@@ -1387,6 +1554,87 @@ class BanksCog(commands.Cog):
                 view.add_item(disnake.ui.Button(label="Подтвердить", style=disnake.ButtonStyle.success, custom_id=f"confirm_loan:{bank_id}:{amount}:{days}"))
                 view.add_item(disnake.ui.Button(label="Отмена", style=disnake.ButtonStyle.secondary, custom_id="confirm_acc_cancel"))
                 await inter.response.send_message(embed=embed, view=view, ephemeral=True, delete_after=30)
+
+        elif action == "open_deposit":
+            bank_id = int(inter.values.get("deposit_bank_id")[0])
+            acc_num = inter.values.get("deposit_acc_num")[0]
+            raw_amount = inter.text_values.get("deposit_amount", "").strip().replace(" ", "")
+
+            if not raw_amount.isdigit():
+                return await inter.response.send_message("❌ Сумма вклада должна быть числом.", ephemeral=True, delete_after=10)
+
+            amount = int(raw_amount)
+            bank = await get_bank(bank_id)
+            if not bank:
+                return await inter.response.send_message("❌ Выбранный банк не найден.", ephemeral=True, delete_after=10)
+
+            if not bank.get("deposits_enabled", 0):
+                return await inter.response.send_message("❌ Приём депозитов в данном банке приостановлен.", ephemeral=True, delete_after=10)
+
+            min_dep = bank.get("min_deposit_amount", 1000)
+            if amount < min_dep:
+                return await inter.response.send_message(
+                    f"❌ Минимальная сумма вклада в данном банке составляет `{format_number(min_dep)}` R$.",
+                    ephemeral=True,
+                    delete_after=10
+                )
+
+            account = await get_account_by_number(acc_num)
+            if not account or account["user_id"] != inter.author.id:
+                return await inter.response.send_message("❌ Счет списания не найден.", ephemeral=True, delete_after=10)
+
+            if account["is_frozen"]:
+                return await inter.response.send_message("❌ Счет списания заморожен.", ephemeral=True, delete_after=10)
+
+            if account["balance"] < amount:
+                return await inter.response.send_message(
+                    f"❌ Недостаточно средств на счете `{acc_num}` (Доступно: `{format_number(account['balance'])}` R$, требуется: `{format_number(amount)}` R$).",
+                    ephemeral=True,
+                    delete_after=10
+                )
+
+            # Списываем средства со счета и открываем депозит
+            interest_rate = bank.get("deposit_interest_rate", 3.0)
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("UPDATE bank_accounts SET balance = balance - ? WHERE account_number = ?", (amount, acc_num))
+                await db.commit()
+
+            dep_id = await create_bank_deposit(inter.author.id, bank_id, acc_num, amount, interest_rate)
+
+            await self.bank_money_logger(
+                bank_id=bank_id,
+                op_type="deposit",
+                user1_id=inter.author.id,
+                account1=acc_num,
+                amount=amount,
+                extra=f"Открыт вклад #{dep_id} под {interest_rate}% в сутки. Списано со счета {acc_num}."
+            )
+
+            # Обновляем панель банка
+            comps = await self.build_bank_control_components(bank_id)
+            ctrl_ch = self.bot.get_channel(bank["control_channel_id"])
+            if ctrl_ch and bank["control_message_id"]:
+                try:
+                    m = await ctrl_ch.fetch_message(bank["control_message_id"])
+                    await m.edit(components=comps)
+                except Exception:
+                    pass
+
+            daily_payout = int(amount * (interest_rate / 100))
+            embed = create_embed(
+                title="📈 Вклад успешно открыт!",
+                description=(
+                    f"**Банк:** «{bank['name']}»\n"
+                    f"**Номер депозита:** `#{dep_id}`\n"
+                    f"**Сумма вклада:** `{format_number(amount)}` R$\n"
+                    f"**Ставка:** `{interest_rate}%` в сутки (около `{format_number(daily_payout)}` R$/день)\n"
+                    f"**Счет для начислений:** `{acc_num}`\n\n"
+                    f"💡 Проценты начисляются автоматически каждые 24 часа из казны банка.\n"
+                    f"Закрыть вклад и вернуть тело можно командой `/bank deposit_close`."
+                ),
+                color=disnake.Color.green()
+            )
+            await inter.response.send_message(embed=embed, ephemeral=True)
 
 
 
@@ -1804,6 +2052,77 @@ class BanksCog(commands.Cog):
                 view=None
             )
 
+        elif custom_id.startswith("bank_bl_btn:add:"):
+            bank_id = int(custom_id.split(":")[2])
+            bank = await get_bank(bank_id)
+            if not bank:
+                return await inter.response.send_message("❌ Банк не найден.", ephemeral=True)
+
+            modal = disnake.ui.Modal(
+                title=f"Внесение в ЧС: {bank['name'][:25]}",
+                custom_id=f"modal:bank_bl_add:{bank_id}",
+                components=[
+                    disnake.ui.TextInput(
+                        label="ID или Пинг пользователя",
+                        placeholder="Например: 123456789012345678 или @пользователь",
+                        custom_id="user_id_raw",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=40
+                    ),
+                    disnake.ui.TextInput(
+                        label="Причина внесения в ЧС",
+                        placeholder="Укажите причину (невозврат кредита, махинации...)",
+                        custom_id="reason",
+                        style=disnake.TextInputStyle.paragraph,
+                        required=True,
+                        max_length=300
+                    )
+                ]
+            )
+            await inter.response.send_modal(modal=modal)
+
+        elif custom_id.startswith("bank_acc_action:"):
+            parts = custom_id.split(":")
+            sub_action = parts[1]
+            bank_id = int(parts[2])
+            acc_num = parts[3]
+
+            if sub_action == "toggle_freeze":
+                async with aiosqlite.connect(DB_PATH) as db:
+                    db.row_factory = aiosqlite.Row
+                    async with db.execute("SELECT is_frozen FROM bank_accounts WHERE account_number = ?", (acc_num,)) as cur:
+                        row = await cur.fetchone()
+                        if not row:
+                            return await inter.response.edit_message(content="❌ Счет не найден.", embed=None, view=None)
+
+                    new_status = 0 if row["is_frozen"] else 1
+                    await db.execute("UPDATE bank_accounts SET is_frozen = ? WHERE account_number = ?", (new_status, acc_num))
+                    await db.commit()
+
+                status_label = "заморожен 🔒" if new_status else "разблокирован 🟢"
+                await inter.response.edit_message(content=f"✅ Лицевой счет `{acc_num}` теперь **{status_label}**.", embed=None, view=None)
+
+            elif sub_action == "rename":
+                acc = await get_account_by_number(acc_num)
+                cur_name = (acc.get("account_name") or "") if acc else ""
+                modal = disnake.ui.Modal(
+                    title=f"Название счета {acc_num}",
+                    custom_id=f"modal:bank_account_rename:{bank_id}:{acc_num}",
+                    components=[
+                        disnake.ui.TextInput(
+                            label="Новое название (метка) счета",
+                            placeholder="Например: Зарплатный счет, Депозитный, Резервный",
+                            value=cur_name,
+                            custom_id="account_name",
+                            style=disnake.TextInputStyle.short,
+                            required=True,
+                            max_length=50
+                        )
+                    ]
+                )
+                await inter.response.send_modal(modal=modal)
+
 
 
 
@@ -1964,11 +2283,11 @@ class BanksCog(commands.Cog):
             view = disnake.ui.View(timeout=60)
             select = disnake.ui.StringSelect(
                 custom_id=f"bank_freeze_select:{bank_id}",
-                placeholder="Выберите лицевой счет для переключения статуса",
+                placeholder="Выберите лицевой счет для управления",
                 options=options
             )
             view.add_item(select)
-            await inter.response.send_message("Выберите счет клиента для заморозки или разблокировки:", view=view, ephemeral=True)
+            await inter.response.send_message("Выберите счет клиента для управления (заморозка/разморозка или переименование):", view=view, ephemeral=True)
 
         # 5. Обновление карточки
         elif action == "refresh":
@@ -1980,7 +2299,90 @@ class BanksCog(commands.Cog):
                 # Если кнопка была нажата на самом сообщении канала
                 await inter.message.edit(components=comps)
 
-        # 6. Запрос кредита коммерческим банком у Нацбанка
+        # 6. Настройка депозитов банка
+        elif action == "deposits":
+            enabled_str = "да" if (bank.get("deposits_enabled", 0)) else "нет"
+            rate_val = str(bank.get("deposit_interest_rate", 3.0))
+            min_val = str(bank.get("min_deposit_amount", 1000))
+
+            modal = disnake.ui.Modal(
+                title=f"Депозиты: {bank['name'][:25]}",
+                custom_id=f"bank_modal:deposits:{bank_id}",
+                components=[
+                    disnake.ui.TextInput(
+                        label="Включить вклады? (да / нет)",
+                        placeholder="да / нет",
+                        value=enabled_str,
+                        custom_id="deposits_status",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=10
+                    ),
+                    disnake.ui.TextInput(
+                        label="Процентная ставка по вкладам (% в 24ч)",
+                        placeholder="3.0",
+                        value=rate_val,
+                        custom_id="deposit_rate",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=6
+                    ),
+                    disnake.ui.TextInput(
+                        label="Минимальная сумма вклада (R$)",
+                        placeholder="1000",
+                        value=min_val,
+                        custom_id="min_deposit",
+                        style=disnake.TextInputStyle.short,
+                        required=True,
+                        max_length=12
+                    )
+                ]
+            )
+            await inter.response.send_modal(modal=modal)
+
+        # 7. Чёрный список банка
+        elif action == "blacklist":
+            bl_list = await get_bank_blacklist(bank_id)
+            desc_lines = [f"### 🚫 Чёрный список банка «{bank['name']}»\n"]
+            if not bl_list:
+                desc_lines.append("В чёрном списке банка сейчас никого нет.\nЛица из ЧС не могут брать кредиты и открывать новые счета в данном банке.")
+            else:
+                desc_lines.append(f"Всего в ЧС: **{len(bl_list)}** чел.\n")
+                for item in bl_list[:10]:
+                    desc_lines.append(f"• <@{item['user_id']}> (`{item['user_id']}`)\n  Причина: *{item['reason']}*\n  Внёс: <@{item['added_by']}> (<t:{item['created_at']}:d>)")
+
+            embed = create_embed(
+                title=f"Управление ЧС: {bank['name']}",
+                description="\n".join(desc_lines),
+                color=disnake.Color.dark_red()
+            )
+            view = disnake.ui.View(timeout=120)
+            view.add_item(disnake.ui.Button(
+                label="Добавить в ЧС",
+                emoji="➕",
+                style=disnake.ButtonStyle.danger,
+                custom_id=f"bank_bl_btn:add:{bank_id}"
+            ))
+
+            if bl_list:
+                bl_options = [
+                    disnake.SelectOption(
+                        label=f"ID: {b['user_id']}",
+                        value=str(b["user_id"]),
+                        description=f"Причина: {b['reason']}"[:100]
+                    )
+                    for b in bl_list[:25]
+                ]
+                select_del = disnake.ui.StringSelect(
+                    custom_id=f"bank_bl_select:remove:{bank_id}",
+                    placeholder="Выберите пользователя для удаления из ЧС",
+                    options=bl_options
+                )
+                view.add_item(select_del)
+
+            await inter.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        # 8. Запрос кредита коммерческим банком у Нацбанка
         elif action == "interbank_req":
             nat_bank = await get_national_bank()
             if not nat_bank:
@@ -2014,7 +2416,7 @@ class BanksCog(commands.Cog):
             )
             await inter.response.send_modal(modal=modal)
 
-        # 7. Погашение межбанковского кредита перед Нацбанком
+        # 9. Погашение межбанковского кредита перед Нацбанком
         elif action == "interbank_pay":
             active_loans = await get_bank_active_interbank_loans(bank_id)
             if not active_loans:
@@ -2476,6 +2878,120 @@ class BanksCog(commands.Cog):
                 ephemeral=True
             )
 
+        # 6. Настройка параметров депозитов
+        elif custom_id.startswith("bank_modal:deposits:"):
+            bank_id = int(custom_id.split(":")[2])
+            bank = await get_bank(bank_id)
+            if not bank:
+                return await inter.response.send_message("❌ Банк не найден.", ephemeral=True)
+
+            raw_status = inter.text_values.get("deposits_status", "").strip().lower()
+            raw_rate = inter.text_values.get("deposit_rate", "").strip().replace(",", ".")
+            raw_min = inter.text_values.get("min_deposit", "").strip().replace(" ", "")
+
+            is_enabled = 1 if any(w in raw_status for w in ["да", "yes", "+", "вкл", "1", "true"]) else 0
+
+            try:
+                rate_val = float(raw_rate)
+                if rate_val < 0:
+                    raise ValueError
+            except ValueError:
+                return await inter.response.send_message("❌ Некорректная процентная ставка.", ephemeral=True)
+
+            if not raw_min.isdigit() or int(raw_min) <= 0:
+                return await inter.response.send_message("❌ Минимальная сумма должна быть положительным числом.", ephemeral=True)
+
+            min_val = int(raw_min)
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("""
+                    UPDATE banks
+                    SET deposits_enabled = ?, deposit_interest_rate = ?, min_deposit_amount = ?
+                    WHERE id = ?
+                """, (is_enabled, rate_val, min_val, bank_id))
+                await db.commit()
+
+            # Обновляем карточку управления
+            comps = await self.build_bank_control_components(bank_id)
+            ch = self.bot.get_channel(bank["control_channel_id"])
+            if ch and bank["control_message_id"]:
+                try:
+                    msg = await ch.fetch_message(bank["control_message_id"])
+                    await msg.edit(components=comps)
+                except Exception:
+                    pass
+
+            status_text = "🟢 **Включены**" if is_enabled else "🔴 **Отключены**"
+            embed = create_embed(
+                title="📈 Настройки депозитов сохранены",
+                description=(
+                    f"**Банк:** «{bank['name']}»\n"
+                    f"• **Статус:** {status_text}\n"
+                    f"• **Процентная ставка:** `{rate_val}%` в 24 часа\n"
+                    f"• **Мин. сумма вклада:** `{format_number(min_val)}` R$"
+                ),
+                color=disnake.Color.green()
+            )
+            await inter.response.send_message(embed=embed, ephemeral=True, delete_after=15)
+
+        # 7. Добавление пользователя в ЧС банка
+        elif custom_id.startswith("modal:bank_bl_add:"):
+            bank_id = int(custom_id.split(":")[2])
+            bank = await get_bank(bank_id)
+            if not bank:
+                return await inter.response.send_message("❌ Банк не найден.", ephemeral=True)
+
+            raw_target = inter.text_values.get("user_id_raw", "").strip().replace("<@", "").replace(">", "").replace("!", "")
+            reason = inter.text_values.get("reason", "").strip()
+
+            if not raw_target.isdigit():
+                return await inter.response.send_message("❌ Укажите корректный ID или пинг пользователя.", ephemeral=True)
+
+            target_user_id = int(raw_target)
+            if not reason:
+                return await inter.response.send_message("❌ Указание причины внесения в ЧС обязательно!", ephemeral=True)
+
+            # Проверяем, не является ли пользователь владельцем или админом
+            if target_user_id == bank["owner_id"]:
+                return await inter.response.send_message("❌ Нельзя добавить владельца банка в собственный ЧС!", ephemeral=True)
+
+            success = await add_to_bank_blacklist(bank_id, target_user_id, reason, inter.author.id)
+            if not success:
+                return await inter.response.send_message("ℹ️ Этот пользователь уже находится в чёрном списке банка.", ephemeral=True)
+
+            embed = create_embed(
+                title="🚫 Пользователь добавлен в чёрный список",
+                description=(
+                    f"**Банк:** «{bank['name']}»\n"
+                    f"**Пользователь:** <@{target_user_id}> (`{target_user_id}`)\n"
+                    f"**Причина:** {reason}\n"
+                    f"**Добавил:** {inter.author.mention}\n\n"
+                    f"⚠️ Данный пользователь больше не сможет брать кредиты и открывать новые счета в данном банке."
+                ),
+                color=disnake.Color.red()
+            )
+            await inter.response.send_message(embed=embed, ephemeral=True, delete_after=20)
+
+        # 8. Переименование счёта владельцем банка
+        elif custom_id.startswith("modal:bank_account_rename:"):
+            parts = custom_id.split(":")
+            bank_id = int(parts[2])
+            acc_num = parts[3]
+
+            new_name = inter.text_values.get("account_name", "").strip()
+            if not new_name:
+                return await inter.response.send_message("❌ Название счёта не может быть пустым.", ephemeral=True)
+
+            renamed = await rename_bank_account(acc_num, new_name)
+            if not renamed:
+                return await inter.response.send_message("❌ Счет не найден.", ephemeral=True)
+
+            await inter.response.send_message(
+                f"✅ Лицевому счету `{acc_num}` успешно присвоено новое название: **«{new_name}»**!",
+                ephemeral=True,
+                delete_after=15
+            )
+
 
     @commands.Cog.listener("on_dropdown")
     async def handle_bank_dropdowns(self, inter: disnake.MessageInteraction):
@@ -2502,25 +3018,64 @@ class BanksCog(commands.Cog):
             )
             return await inter.response.send_modal(modal=modal)
 
-        if not inter.component.custom_id.startswith("bank_freeze_select:"):
-            return
+        # Выбор счета в панели банка: показать меню действий (Заморозка/разморозка или Переименование)
+        if inter.component.custom_id.startswith("bank_freeze_select:"):
+            bank_id = int(inter.component.custom_id.split(":")[1])
+            acc_num = inter.values[0]
 
-        bank_id = int(inter.component.custom_id.split(":")[1])
-        acc_num = inter.values[0]
+            acc = await get_account_by_number(acc_num)
+            if not acc:
+                return await inter.response.edit_message(content="❌ Счет не найден.", view=None)
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT is_frozen FROM bank_accounts WHERE account_number = ?", (acc_num,)) as cur:
-                row = await cur.fetchone()
-                if not row:
-                    return await inter.response.edit_message(content="❌ Счет не найден.", view=None)
+            current_name = acc.get("account_name") or "Не задано"
+            status_str = "🔒 Заморожен" if acc["is_frozen"] else "🟢 Активен"
+            toggle_label = "Разблокировать" if acc["is_frozen"] else "Заморозить"
+            toggle_style = disnake.ButtonStyle.success if acc["is_frozen"] else disnake.ButtonStyle.danger
 
-            new_status = 0 if row["is_frozen"] else 1
-            await db.execute("UPDATE bank_accounts SET is_frozen = ? WHERE account_number = ?", (new_status, acc_num))
-            await db.commit()
+            embed = create_embed(
+                title=f"Управление счетом {acc_num}",
+                description=(
+                    f"**Банк:** {acc['bank_name']}\n"
+                    f"**Владелец:** <@{acc['user_id']}>\n"
+                    f"**Текущее название:** `{current_name}`\n"
+                    f"**Баланс:** `{format_number(acc['balance'])}` R$\n"
+                    f"**Статус:** {status_str}\n\n"
+                    f"Выберите необходимое действие:"
+                ),
+                color=disnake.Color.blue()
+            )
+            view = disnake.ui.View(timeout=60)
+            view.add_item(disnake.ui.Button(
+                label=toggle_label,
+                style=toggle_style,
+                emoji="🔒",
+                custom_id=f"bank_acc_action:toggle_freeze:{bank_id}:{acc_num}"
+            ))
+            view.add_item(disnake.ui.Button(
+                label="Изменить название",
+                style=disnake.ButtonStyle.primary,
+                emoji="✏️",
+                custom_id=f"bank_acc_action:rename:{bank_id}:{acc_num}"
+            ))
+            return await inter.response.edit_message(embed=embed, view=view)
 
-        status_label = "заморожен 🔒" if new_status else "разблокирован 🟢"
-        await inter.response.edit_message(content=f"✅ Лицевой счет `{acc_num}` теперь **{status_label}**.", view=None)
+        # Удаление пользователя из ЧС банка через select
+        if inter.component.custom_id.startswith("bank_bl_select:remove:"):
+            bank_id = int(inter.component.custom_id.split(":")[2])
+            target_user_id = int(inter.values[0])
+            removed = await remove_from_bank_blacklist(bank_id, target_user_id)
+            if removed:
+                return await inter.response.edit_message(
+                    content=f"✅ Пользователь <@{target_user_id}> (`{target_user_id}`) исключён из чёрного списка банка.",
+                    embed=None,
+                    view=None
+                )
+            else:
+                return await inter.response.edit_message(
+                    content="❌ Не удалось найти пользователя в чёрном списке банка.",
+                    embed=None,
+                    view=None
+                )
 
     @commands.Cog.listener("on_dropdown")
     async def handle_service_dropdowns(self, inter: disnake.MessageInteraction):
