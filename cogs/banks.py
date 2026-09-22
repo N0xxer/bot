@@ -406,11 +406,12 @@ class BanksCog(commands.Cog):
         accounts = await get_user_accounts(inter.author.id)
         res = {}
         for acc in accounts:
-            name_part = f" («{acc['account_name']}»)" if acc.get("account_name") else ""
+            acc_name = acc["account_name"] if "account_name" in acc.keys() else None
+            name_part = f" («{acc_name}»)" if acc_name else ""
             label = f"{acc['bank_name']} | {acc['account_number']}{name_part} ({format_number(acc['balance'])} R$)"
             if (user_input.lower() in acc['account_number'].lower() or
                 user_input.lower() in acc['bank_name'].lower() or
-                (acc.get("account_name") and user_input.lower() in acc['account_name'].lower())):
+                (acc_name and user_input.lower() in acc_name.lower())):
                 res[label[:100]] = acc['account_number']
         return res
 
@@ -733,7 +734,8 @@ class BanksCog(commands.Cog):
         else:
             for acc in accounts:
                 frozen_str = "да" if acc["is_frozen"] else "нет"
-                name_str = f"\nНазвание: {acc['account_name']}" if acc.get("account_name") else ""
+                acc_name = acc["account_name"] if "account_name" in acc.keys() else None
+                name_str = f"\nНазвание: {acc_name}" if acc_name else ""
                 block = (
                     f"```Счет в банке {acc['bank_name']}\n"
                     f"Номер: {acc['account_number']}{name_str}\n"
@@ -1309,7 +1311,7 @@ class BanksCog(commands.Cog):
 
         elif action == "open_deposit":
             # Выбираем только банки, где включены депозиты
-            deposit_banks = [b for b in banks if b.get("deposits_enabled", 0)]
+            deposit_banks = [b for b in banks if ("deposits_enabled" in b.keys() and b["deposits_enabled"])]
             if not deposit_banks:
                 return await inter.response.send_message("❌ В настоящее время ни один банк не принимает вклады.", ephemeral=True)
 
@@ -1322,7 +1324,7 @@ class BanksCog(commands.Cog):
                 disnake.SelectOption(
                     label=b["name"][:100],
                     value=str(b["id"]),
-                    description=f"Ставка: {b.get('deposit_interest_rate', 3.0)}% | Мин. вклад: {format_number(b.get('min_deposit_amount', 1000))} R$"[:100]
+                    description=f"Ставка: {b['deposit_interest_rate'] if 'deposit_interest_rate' in b.keys() else 3.0}% | Мин. вклад: {format_number(b['min_deposit_amount'] if 'min_deposit_amount' in b.keys() else 1000)} R$"[:100]
                 ) for b in deposit_banks[:25]
             ]
 
@@ -1568,10 +1570,10 @@ class BanksCog(commands.Cog):
             if not bank:
                 return await inter.response.send_message("❌ Выбранный банк не найден.", ephemeral=True, delete_after=10)
 
-            if not bank.get("deposits_enabled", 0):
+            if not (bank["deposits_enabled"] if "deposits_enabled" in bank.keys() else False):
                 return await inter.response.send_message("❌ Приём депозитов в данном банке приостановлен.", ephemeral=True, delete_after=10)
 
-            min_dep = bank.get("min_deposit_amount", 1000)
+            min_dep = bank["min_deposit_amount"] if "min_deposit_amount" in bank.keys() else 1000
             if amount < min_dep:
                 return await inter.response.send_message(
                     f"❌ Минимальная сумма вклада в данном банке составляет `{format_number(min_dep)}` R$.",
@@ -1594,7 +1596,7 @@ class BanksCog(commands.Cog):
                 )
 
             # Списываем средства со счета и открываем депозит
-            interest_rate = bank.get("deposit_interest_rate", 3.0)
+            interest_rate = bank["deposit_interest_rate"] if "deposit_interest_rate" in bank.keys() else 3.0
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("UPDATE bank_accounts SET balance = balance - ? WHERE account_number = ?", (amount, acc_num))
                 await db.commit()
@@ -2105,7 +2107,7 @@ class BanksCog(commands.Cog):
 
             elif sub_action == "rename":
                 acc = await get_account_by_number(acc_num)
-                cur_name = (acc.get("account_name") or "") if acc else ""
+                cur_name = (acc["account_name"] or "") if (acc and "account_name" in acc.keys()) else ""
                 modal = disnake.ui.Modal(
                     title=f"Название счета {acc_num}",
                     custom_id=f"modal:bank_account_rename:{bank_id}:{acc_num}",
@@ -2301,9 +2303,9 @@ class BanksCog(commands.Cog):
 
         # 6. Настройка депозитов банка
         elif action == "deposits":
-            enabled_str = "да" if (bank.get("deposits_enabled", 0)) else "нет"
-            rate_val = str(bank.get("deposit_interest_rate", 3.0))
-            min_val = str(bank.get("min_deposit_amount", 1000))
+            enabled_str = "да" if ("deposits_enabled" in bank.keys() and bank["deposits_enabled"]) else "нет"
+            rate_val = str(bank["deposit_interest_rate"] if "deposit_interest_rate" in bank.keys() else 3.0)
+            min_val = str(bank["min_deposit_amount"] if "min_deposit_amount" in bank.keys() else 1000)
 
             modal = disnake.ui.Modal(
                 title=f"Депозиты: {bank['name'][:25]}",
@@ -3027,7 +3029,7 @@ class BanksCog(commands.Cog):
             if not acc:
                 return await inter.response.edit_message(content="❌ Счет не найден.", view=None)
 
-            current_name = acc.get("account_name") or "Не задано"
+            current_name = (acc["account_name"] if "account_name" in acc.keys() and acc["account_name"] else "Не задано")
             status_str = "🔒 Заморожен" if acc["is_frozen"] else "🟢 Активен"
             toggle_label = "Разблокировать" if acc["is_frozen"] else "Заморозить"
             toggle_style = disnake.ButtonStyle.success if acc["is_frozen"] else disnake.ButtonStyle.danger
