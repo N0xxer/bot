@@ -5,13 +5,25 @@ from disnake.ext import commands
 import aiosqlite
 from typing import Optional
 import math
+import os
 
-from functions.db_helpers import get_user_info, update_user_info, DB_PATH
+from functions.db_helpers import (
+    get_user_info, update_user_info, DB_PATH, get_user_region, set_user_region,
+    get_user_party, set_user_party, get_all_parties
+)
 from functions.utils import create_embed, format_number, UniversalModal, ensure_user_registered
 
 # Загрузка конфигурации ролей
 with open("configs/function_roles_config.json", "r", encoding="utf-8") as f:
     ROLES_CONFIG = json.load(f)
+
+# Загрузка списка регионов
+REGIONS_CONFIG_PATH = "configs/regions_config.json"
+if os.path.exists(REGIONS_CONFIG_PATH):
+    with open(REGIONS_CONFIG_PATH, "r", encoding="utf-8") as f:
+        REGIONS_LIST = json.load(f).get("regions", [])
+else:
+    REGIONS_LIST = []
 
 
 def parse_roles(raw_roles) -> list:
@@ -63,6 +75,10 @@ class EconomyCog(commands.Cog):
         photo_url = await get_user_info(target_id, "photo")
         last_collection = await get_user_info(target_id, "last_collection")
         raw_mandates = await get_user_info(target_id, "mandates")
+        user_reg = await get_user_region(target_id)
+        region_str = f"📍 **Прописка (Регион):** `{user_reg}`\n" if user_reg else "📍 **Прописка (Регион):** `Не указана`\n"
+        user_party = await get_user_party(target_id)
+        party_str = f"🏛️ **Партия:** `{user_party}`\n"
 
         # 2. Формирование строки мандатов
         mandates_display = ""
@@ -90,6 +106,8 @@ class EconomyCog(commands.Cog):
         # 4. Сборка описания эмбеда
         desc = (
             f"👤 **ФИО:** `{fio_display}`\n"
+            f"{region_str}"
+            f"{party_str}"
             f"💳 **Баланс:** `{format_number(balance)}` R$\n"
             f"📈 **Суммарная зарплата:** `{format_number(total_income)}` R$ / 3 дня\n"
             f"{mandates_display}\n"
@@ -547,6 +565,30 @@ class EconomyCog(commands.Cog):
 
 
 
+    async def economy_region_autocomplete(inter: disnake.ApplicationCommandInteraction, user_input: str):
+        choices = [reg for reg in REGIONS_LIST if user_input.lower() in reg.lower()]
+        return [disnake.OptionChoice(name=reg, value=reg) for reg in choices[:25]]
+
+    async def party_autocomplete(inter: disnake.ApplicationCommandInteraction, user_input: str):
+        parties = await get_all_parties()
+        choices = ["Беспартийный"]
+        for p in parties:
+            p_name = p.get("name")
+            if p_name and p_name not in choices:
+                choices.append(p_name)
+
+        matching = [c for c in choices if user_input.lower() in c.lower()]
+        options = []
+        for name in matching[:25]:
+            if name == "Беспартийный":
+                options.append(disnake.OptionChoice(name="⚪ Беспартийный", value="Беспартийный"))
+            else:
+                party = next((p for p in parties if p.get("name") == name), None)
+                em = party.get("emoji") if party else None
+                label = f"{em} {name}"[:100] if em else name[:100]
+                options.append(disnake.OptionChoice(name=label, value=name))
+        return options
+
     @commands.slash_command(
         name="register",
         description="Зарегистрировать РП-персонажа гражданину (Админ)",
@@ -556,7 +598,8 @@ class EconomyCog(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         member: disnake.Member = commands.Param(description="Пользователь для регистрации"),
-        fio: str = commands.Param(description="РП ФИО персонажа")
+        fio: str = commands.Param(description="РП ФИО персонажа"),
+        регион: Optional[str] = commands.Param(default=None, description="Регион прописки", autocomplete=economy_region_autocomplete)
     ):
         """Прямая регистрация персонажа с начислением стартового капитала."""
         current_fio = await get_user_info(member.id, "FIO")
@@ -569,31 +612,35 @@ class EconomyCog(commands.Cog):
             return await inter.response.send_message(embed=embed, ephemeral=True)
 
         clean_fio = fio.strip()
+        region_val = регион.strip() if регион else None
 
         # Запись в БД со стартовым балансом и пустыми должностями
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
-                INSERT INTO users (user_id, balance, FIO, functions, photo, last_collection, last_work)
-                VALUES (?, ?, ?, NULL, NULL, NULL, NULL)
+                INSERT INTO users (user_id, balance, FIO, functions, photo, last_collection, last_work, region)
+                VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     balance = ?,
                     FIO = ?,
                     functions = NULL,
                     photo = NULL,
                     last_collection = NULL,
-                    last_work = NULL
+                    last_work = NULL,
+                    region = ?
                 """,
-                (member.id, self.starting_balance, clean_fio, self.starting_balance, clean_fio)
+                (member.id, self.starting_balance, clean_fio, region_val, self.starting_balance, clean_fio, region_val)
             )
             await db.commit()
+
+        reg_info = f"\n**Прописка (Регион):** `{region_val}`" if region_val else ""
 
         # Ответ администратору
         admin_embed = create_embed(
             title="✅ Персонаж зарегистрирован",
             description=(
                 f"**Гражданин:** {member.mention} (`{member.id}`)\n"
-                f"**ФИО:** `{clean_fio}`\n"
+                f"**ФИО:** `{clean_fio}`{reg_info}\n"
                 f"**Стартовый капитал:** `{format_number(self.starting_balance)}` ₽"
             ),
             color=disnake.Color.green()
@@ -605,7 +652,7 @@ class EconomyCog(commands.Cog):
             title="🎉 Регистрация завершена",
             description=(
                 f"Вы были успешно внесены в государственную базу данных!\n\n"
-                f"👤 **ФИО:** `{clean_fio}`\n"
+                f"👤 **ФИО:** `{clean_fio}`{reg_info}\n"
                 f"💳 **Стартовый капитал:** `{format_number(self.starting_balance)}` ₽\n"
                 f"Регистратор: {inter.author.mention}"
             ),
@@ -615,6 +662,50 @@ class EconomyCog(commands.Cog):
             await member.send(embed=user_embed)
         except disnake.Forbidden:
             pass
+
+    @commands.slash_command(
+        name="set_region",
+        description="Установить или сменить регион прописки гражданина (Админ)",
+        default_member_permissions=disnake.Permissions(administrator=True)
+    )
+    async def set_region_cmd(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        пользователь: disnake.Member = commands.Param(description="Гражданин"),
+        регион: str = commands.Param(description="Новый регион прописки", autocomplete=economy_region_autocomplete)
+    ):
+        if not await ensure_user_registered(inter, пользователь.id):
+            return
+
+        await set_user_region(пользователь.id, регион)
+        embed = create_embed(
+            title="📍 Прописка обновлена",
+            description=f"Гражданину {пользователь.mention} установлен регион прописки: **«{регион}»**.",
+            color=disnake.Color.green()
+        )
+        await inter.response.send_message(embed=embed, ephemeral=True)
+
+    @commands.slash_command(
+        name="set_party",
+        description="Установить или сменить политическую партию гражданина (Админ)",
+        default_member_permissions=disnake.Permissions(administrator=True)
+    )
+    async def set_party_cmd(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        пользователь: disnake.Member = commands.Param(description="Гражданин"),
+        партия: str = commands.Param(description="Новая политическая партия", autocomplete=party_autocomplete)
+    ):
+        if not await ensure_user_registered(inter, пользователь.id):
+            return
+
+        await set_user_party(пользователь.id, партия)
+        container = disnake.ui.Container(
+            disnake.ui.TextDisplay(
+                content=f"### 🏛️ Политическая партия обновлена\n\nГражданину {пользователь.mention} установлена партия: **«{партия}»**."
+            )
+        )
+        await inter.response.send_message(components=[container], ephemeral=True)
 
     @commands.slash_command(
         name="unregister",

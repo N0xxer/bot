@@ -1054,8 +1054,7 @@ class BanksCog(commands.Cog):
         components = [
             disnake.ui.Container(
                 disnake.ui.TextDisplay(content=content),
-                disnake.ui.MediaGallery(disnake.MediaGalleryItem(media="attachment://banki.png")),
-                accent_color=MAIN_COLOR
+                disnake.ui.MediaGallery(disnake.MediaGalleryItem(media="attachment://banki.png"))
             ),
             disnake.ui.ActionRow(
                 disnake.ui.Button(

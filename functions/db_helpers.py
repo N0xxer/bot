@@ -20,7 +20,9 @@ ALLOWED_USER_FIELDS = {
     "photo",
     "last_collection",
     "last_work",
-    "mandates"
+    "mandates",
+    "region",
+    "party"
 }
 
 
@@ -37,7 +39,29 @@ async def init_db():
                 photo TEXT DEFAULT NULL,
                 last_collection INTEGER DEFAULT NULL,
                 last_work INTEGER DEFAULT NULL,
-                mandates INTEGER DEFAULT 0
+                mandates INTEGER DEFAULT 0,
+                region TEXT DEFAULT NULL,
+                party TEXT DEFAULT 'Беспартийный'
+            )
+        """)
+
+        # Миграция: добавление полей в users, если они еще не существуют
+        async with db.execute("PRAGMA table_info(users)") as cursor:
+            existing_user_cols = {row[1] for row in await cursor.fetchall()}
+        if "region" not in existing_user_cols:
+            await db.execute("ALTER TABLE users ADD COLUMN region TEXT DEFAULT NULL")
+        if "party" not in existing_user_cols:
+            await db.execute("ALTER TABLE users ADD COLUMN party TEXT DEFAULT 'Беспартийный'")
+
+        # Таблица политических партий
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS parties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                emoji TEXT DEFAULT '🏛️',
+                description TEXT DEFAULT '',
+                leader_id INTEGER DEFAULT NULL,
+                created_at INTEGER NOT NULL
             )
         """)
         
@@ -111,6 +135,35 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+
+        # Таблица выборов
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS elections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                election_type TEXT NOT NULL,
+                target_region TEXT DEFAULT NULL,
+                candidates TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'draft',
+                announcement_channel_id INTEGER DEFAULT NULL,
+                announcement_message_id INTEGER DEFAULT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """)
+
+        # Таблица голосов избирателей
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS election_votes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                election_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                choice TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(election_id, user_id),
+                FOREIGN KEY (election_id) REFERENCES elections(id)
+            )
+        """)
+
+        await db.commit()
 
 
 
@@ -810,4 +863,192 @@ async def close_bank_deposit(deposit_id: int) -> bool:
         await db.execute("UPDATE bank_deposits SET is_closed = 1 WHERE id = ?", (deposit_id,))
         await db.commit()
         return True
+
+
+# ================= ВЫБОРНАЯ СИСТЕМА И ПРОПИСКА =================
+
+async def set_user_region(user_id: int, region_name: Optional[str]):
+    """Установить регион прописки персонажа."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET region = ? WHERE user_id = ?", (region_name, user_id))
+        await db.commit()
+
+async def get_user_region(user_id: int) -> Optional[str]:
+    """Получить регион прописки персонажа."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT region FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else None
+
+async def create_election(election_type: str, target_region: Optional[str] = None) -> int:
+    """Создает новую кампанию выборов."""
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            INSERT INTO elections (election_type, target_region, candidates, status, created_at)
+            VALUES (?, ?, '[]', 'draft', ?)
+        """, (election_type, target_region, now))
+        eid = cursor.lastrowid
+        await db.commit()
+        return eid
+
+async def get_election_by_id(election_id: int) -> Optional[Dict[str, Any]]:
+    """Получить данные о выборах по ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM elections WHERE id = ?", (election_id,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+async def get_latest_election(election_type: str, target_region: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Получить последние выборы заданного типа и региона."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if target_region:
+            query = "SELECT * FROM elections WHERE election_type = ? AND target_region = ? ORDER BY id DESC LIMIT 1"
+            params = (election_type, target_region)
+        else:
+            query = "SELECT * FROM elections WHERE election_type = ? ORDER BY id DESC LIMIT 1"
+            params = (election_type,)
+        async with db.execute(query, params) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+async def update_election_candidates(election_id: int, candidates: list):
+    """Обновить список кандидатов/партий выборов."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE elections SET candidates = ? WHERE id = ?", (json.dumps(candidates, ensure_ascii=False), election_id))
+        await db.commit()
+
+async def update_election_status(election_id: int, status: str, channel_id: Optional[int] = None, message_id: Optional[int] = None):
+    """Обновить статус выборов (draft/active/finished) и привязку сообщения."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        updates = ["status = ?"]
+        params = [status]
+        if channel_id is not None:
+            updates.append("announcement_channel_id = ?")
+            params.append(channel_id)
+        if message_id is not None:
+            updates.append("announcement_message_id = ?")
+            params.append(message_id)
+        params.append(election_id)
+        await db.execute(f"UPDATE elections SET {', '.join(updates)} WHERE id = ?", tuple(params))
+        await db.commit()
+
+async def has_user_voted_election(election_id: int, user_id: int) -> bool:
+    """Проверить, отдал ли уже пользователь свой голос в этих выборах."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM election_votes WHERE election_id = ? AND user_id = ?", (election_id, user_id)) as cursor:
+            return bool(await cursor.fetchone())
+
+async def add_election_vote(election_id: int, user_id: int, choice: str) -> bool:
+    """Зафиксировать голос избирателя."""
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("""
+                INSERT INTO election_votes (election_id, user_id, choice, created_at)
+                VALUES (?, ?, ?, ?)
+            """, (election_id, user_id, choice, now))
+            await db.commit()
+            return True
+        except Exception:
+            return False
+
+async def get_election_votes_summary(election_id: int) -> Dict[str, int]:
+    """Получить сводку результатов выборов: количество голосов по каждому кандидату/партии."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT choice, COUNT(*) as cnt
+            FROM election_votes
+            WHERE election_id = ?
+            GROUP BY choice
+            ORDER BY cnt DESC
+        """, (election_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return {row[0]: row[1] for row in rows}
+
+
+# ================= ПОЛИТИЧЕСКИЕ ПАРТИИ =================
+
+async def set_user_party(user_id: int, party_name: str):
+    """Установить политическую партию гражданина."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET party = ? WHERE user_id = ?", (party_name, user_id))
+        await db.commit()
+
+async def get_user_party(user_id: int) -> str:
+    """Получить партию гражданина (по умолчанию 'Беспартийный')."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT party FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else "Беспартийный"
+
+async def create_party(name: str, emoji: Optional[str] = None, description: Optional[str] = None, leader_id: Optional[int] = None) -> int:
+    """Создать новую политическую партию."""
+    now = int(time.time())
+    em = emoji or "🏛️"
+    desc = description or ""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            INSERT INTO parties (name, emoji, description, leader_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (name, em, desc, leader_id, now))
+        pid = cursor.lastrowid
+        await db.commit()
+        return pid
+
+async def get_all_parties():
+    """Возвращает список всех зарегистрированных партий."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM parties ORDER BY id ASC") as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+async def get_party_by_id(party_id: int):
+    """Получить данные партии по ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM parties WHERE id = ?", (party_id,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+async def get_party_by_name(name: str):
+    """Получить данные партии по названию."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM parties WHERE name = ?", (name,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+async def update_party(party_id: int, name: str, emoji: Optional[str], description: Optional[str], leader_id: Optional[int]):
+    """Обновляет информацию о партии."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Если имя партии меняется, обновляем и пользователей
+        old_party = await get_party_by_id(party_id)
+        await db.execute("""
+            UPDATE parties
+            SET name = ?, emoji = ?, description = ?, leader_id = ?
+            WHERE id = ?
+        """, (name, emoji, description, leader_id, party_id))
+        if old_party and old_party["name"] != name:
+            await db.execute("UPDATE users SET party = ? WHERE party = ?", (name, old_party["name"]))
+        await db.commit()
+
+async def delete_party(party_id: int):
+    """Удаляет партию из реестра и переводит её членов в статус 'Беспартийный'."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        party = await get_party_by_id(party_id)
+        await db.execute("DELETE FROM parties WHERE id = ?", (party_id,))
+        if party:
+            await db.execute("UPDATE users SET party = 'Беспартийный' WHERE party = ?", (party["name"],))
+        await db.commit()
+
+async def get_party_members_count(party_name: str) -> int:
+    """Возвращает число членов в данной партии."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM users WHERE party = ?", (party_name,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
 

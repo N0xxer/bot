@@ -1,12 +1,44 @@
 import json
 import os
+import re
 import time
 import aiosqlite
 import disnake
 from disnake.ext import commands
+from typing import Optional, Tuple
 
-from functions.db_helpers import create_law_proposal, get_user_info, update_user_info, get_law_proposal, update_law_proposal_status, DB_PATH
+from functions.db_helpers import (
+    create_law_proposal,
+    get_user_info,
+    update_user_info,
+    get_law_proposal,
+    update_law_proposal_status,
+    DB_PATH,
+    create_election,
+    get_election_by_id,
+    get_latest_election,
+    update_election_candidates,
+    update_election_status,
+    has_user_voted_election,
+    add_election_vote,
+    get_election_votes_summary,
+    get_user_region,
+    create_party,
+    get_all_parties,
+    get_party_by_id,
+    get_party_by_name,
+    delete_party,
+    get_party_members_count
+)
 from functions.utils import create_embed, UniversalModal, format_number, ensure_user_registered
+
+# Загрузка списка регионов
+REGIONS_CONFIG_PATH = "configs/regions_config.json"
+if os.path.exists(REGIONS_CONFIG_PATH):
+    with open(REGIONS_CONFIG_PATH, "r", encoding="utf-8") as f:
+        REGIONS_LIST = json.load(f).get("regions", [])
+else:
+    REGIONS_LIST = []
 
 # === КОНФИГУРАЦИЯ И СПИСКИ РОЛЕЙ ===
 # ID канала для логирования выдачи/снятия ролей (укажи свой)
@@ -984,6 +1016,1083 @@ class PoliticsCog(commands.Cog):
             pass
 
         await inter.delete_original_message()
+
+
+
+    # ==========================================
+    #             ВЫБОРНАЯ СИСТЕМА
+    # ==========================================
+
+    @staticmethod
+    def parse_candidate_line(line: str, guild: Optional[disnake.Guild] = None) -> Tuple[Optional[str], str]:
+        """
+        Извлекает эмодзи (кастомный эмодзи сервера, стандартный флаг/юникод) из начала строки.
+        Поддерживает форматы:
+        • <:name:id> Название
+        • <a:name:id> Название
+        • :name: Название (если эмодзи с таким именем есть на сервере)
+        • 🚩 Название / 🇷🇺 Название
+        • Эмодзи | Название
+        """
+        line = line.strip()
+        if not line:
+            return None, ""
+
+        emoji_pattern = re.compile(
+            r'^('
+            r'<a?:[a-zA-Z0-9_]+:[0-9]{17,20}>'
+            r'|[\U0001F1E6-\U0001F1FF]{2}'
+            r'|[\U0001F300-\U0001FAFF\u2600-\u27BF\u2300-\u23FF\u2B50-\u2B55\u200D\uFE0F]+'
+            r'|:[a-zA-Z0-9_]+:'
+            r')\s*\|?\s*(.*)',
+            re.UNICODE
+        )
+
+        m = emoji_pattern.match(line)
+        if not m:
+            return None, line
+
+        token = m.group(1).strip()
+        rest = m.group(2).strip()
+
+        # Если задан шорткод :name:
+        if token.startswith(":") and token.endswith(":") and not token.startswith("<"):
+            if guild:
+                clean_name = token[1:-1]
+                found_emoji = disnake.utils.get(guild.emojis, name=clean_name)
+                if found_emoji:
+                    return str(found_emoji), rest
+            # Если не найден среди эмодзи сервера — возвращаем как обычный текст
+            return None, line
+
+        return token, rest
+
+    @commands.slash_command(
+        name="election",
+        description="Управление избирательной системой и выборами",
+        default_member_permissions=disnake.Permissions(administrator=True)
+    )
+    async def election_cmd_group(self, inter: disnake.ApplicationCommandInteraction):
+        pass
+
+    @election_cmd_group.sub_command(
+        name="panel",
+        description="Открыть панель настройки и проведения выборов (Администрация)"
+    )
+    async def election_panel(self, inter: disnake.ApplicationCommandInteraction):
+        await inter.response.defer(ephemeral=True)
+
+        embed = create_embed(
+            title="🗳️ Избирательная комиссия Резендии",
+            description=(
+                "Добро пожаловать в панель управления выборами.\n\n"
+                "Выберите уровень выборов для настройки и проведения:\n"
+                "• **🏛️ Федеральные** (Президентские / Парламентские)\n"
+                "• **📍 Земельные** (Выборы глав регионов)"
+            ),
+            color=disnake.Color.blue()
+        )
+        view = disnake.ui.View(timeout=180)
+        view.add_item(disnake.ui.Button(
+            label="Федеральные",
+            style=disnake.ButtonStyle.primary,
+            emoji="🏛️",
+            custom_id="el_nav:level:federal"
+        ))
+        view.add_item(disnake.ui.Button(
+            label="Земельные",
+            style=disnake.ButtonStyle.secondary,
+            emoji="📍",
+            custom_id="el_nav:level:regional"
+        ))
+        await inter.edit_original_message(embed=embed, view=view)
+
+    # ==========================================
+    #            УПРАВЛЕНИЕ ПАРТИЯМИ (/party)
+    # ==========================================
+
+    async def build_party_panel_components(self) -> list:
+        parties = await get_all_parties()
+
+        cards = []
+        if not parties:
+            cards.append("*(В государственном реестре пока нет зарегистрированных партий)*")
+        else:
+            for p in parties:
+                pid = p["id"]
+                name = p["name"]
+                emoji = p.get("emoji") or "🏛️"
+                desc = p.get("description") or "Без описания"
+                leader_id = p.get("leader_id")
+                leader_str = f"<@{leader_id}>" if leader_id else "`Не назначен`"
+                count = await get_party_members_count(name)
+
+                cards.append(
+                    f"{emoji} **{name}** (ID: `{pid}`)\n"
+                    f"👑 **Лидер:** {leader_str} • 👥 **Членов:** `{count}` чел.\n"
+                    f"📝 *{desc}*"
+                )
+
+        container_text = (
+            "### 🏛️ Реестр политических партий Резендии\n\n"
+            "Панель управления официальным списком политических партий республики.\n\n"
+            + "\n\n---\n\n".join(cards)
+        )
+
+        container = disnake.ui.Container(
+            disnake.ui.TextDisplay(content=container_text)
+        )
+
+        buttons = [
+            disnake.ui.Button(
+                label="Создать партию",
+                emoji="➕",
+                style=disnake.ButtonStyle.success,
+                custom_id="party_admin:create"
+            ),
+            disnake.ui.Button(
+                label="Удалить партию",
+                emoji="🗑️",
+                style=disnake.ButtonStyle.danger,
+                custom_id="party_admin:delete"
+            ),
+            disnake.ui.Button(
+                label="Обновить",
+                emoji="🔄",
+                style=disnake.ButtonStyle.secondary,
+                custom_id="party_admin:refresh"
+            )
+        ]
+        action_row = disnake.ui.ActionRow(*buttons)
+
+        return [container, action_row]
+
+    @commands.slash_command(
+        name="party",
+        description="Управление политическими партиями Резендии",
+        default_member_permissions=disnake.Permissions(administrator=True)
+    )
+    async def party_cmd_group(self, inter: disnake.ApplicationCommandInteraction):
+        pass
+
+    @party_cmd_group.sub_command(
+        name="panel",
+        description="Панель настройки и управления партиями (Администрация)"
+    )
+    async def party_panel(self, inter: disnake.ApplicationCommandInteraction):
+        await inter.response.defer(ephemeral=True)
+        components = await self.build_party_panel_components()
+        await inter.edit_original_message(components=components)
+
+    @commands.Cog.listener("on_button_click")
+    async def handle_election_buttons(self, inter: disnake.MessageInteraction):
+        custom_id = inter.component.custom_id
+
+        # -----------------------------------------------------------
+        # ПАНЕЛЬ УПРАВЛЕНИЯ ПАРТИЯМИ (АДМИНИСТРАЦИЯ)
+        # -----------------------------------------------------------
+        if custom_id.startswith("party_admin:"):
+            if not inter.author.guild_permissions.administrator:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="⛔ Доступ разрешен только администраторам."))],
+                    ephemeral=True
+                )
+
+            action = custom_id.split(":")[1]
+
+            if action in ("refresh", "cancel_delete"):
+                components = await self.build_party_panel_components()
+                return await inter.response.edit_message(components=components)
+
+            elif action == "create":
+                modal = disnake.ui.Modal(
+                    title="Создание политической партии",
+                    custom_id="party_modal:create",
+                    components=[
+                        disnake.ui.TextInput(
+                            label="Название партии",
+                            placeholder="Либерально-демократическая партия",
+                            custom_id="party_name",
+                            style=disnake.TextInputStyle.short,
+                            required=True,
+                            max_length=60
+                        ),
+                        disnake.ui.TextInput(
+                            label="Эмодзи или флаг партии",
+                            placeholder="🚩 или <:flag:1234567890>",
+                            custom_id="party_emoji",
+                            style=disnake.TextInputStyle.short,
+                            required=False,
+                            max_length=60
+                        ),
+                        disnake.ui.TextInput(
+                            label="Discord ID лидера (необязательно)",
+                            placeholder="123456789012345678",
+                            custom_id="party_leader",
+                            style=disnake.TextInputStyle.short,
+                            required=False,
+                            max_length=30
+                        ),
+                        disnake.ui.TextInput(
+                            label="Краткое описание / программа",
+                            placeholder="Краткая программа или идеология партии...",
+                            custom_id="party_desc",
+                            style=disnake.TextInputStyle.paragraph,
+                            required=False,
+                            max_length=300
+                        ),
+                    ]
+                )
+                return await inter.response.send_modal(modal=modal)
+
+            elif action == "delete":
+                parties = await get_all_parties()
+                if not parties:
+                    return await inter.response.send_message(
+                        components=[disnake.ui.Container(disnake.ui.TextDisplay(content="❌ В реестре нет зарегистрированных партий для удаления."))],
+                        ephemeral=True
+                    )
+
+                options = []
+                for p in parties[:25]:
+                    opt_emoji = None
+                    if p.get("emoji"):
+                        em_str = p["emoji"].strip()
+                        if em_str.startswith("<") and em_str.endswith(">"):
+                            try:
+                                opt_emoji = disnake.PartialEmoji.from_str(em_str)
+                            except Exception:
+                                opt_emoji = None
+                        else:
+                            opt_emoji = em_str
+
+                    desc_str = f"ID: {p['id']}"
+                    if p.get("leader_id"):
+                        desc_str += f" | Лидер: {p['leader_id']}"
+
+                    options.append(
+                        disnake.SelectOption(
+                            label=p["name"][:100],
+                            value=str(p["id"]),
+                            description=desc_str[:100],
+                            emoji=opt_emoji
+                        )
+                    )
+
+                del_components = [
+                    disnake.ui.Container(
+                        disnake.ui.TextDisplay(
+                            content=(
+                                "### 🗑️ Удаление политической партии\n\n"
+                                "Выберите партию, которую необходимо удалить из реестра Резендии.\n\n"
+                                "⚠️ **Внимание:** Все участники удалённой партии автоматически получат статус `Беспартийный`!"
+                            )
+                        )
+                    ),
+                    disnake.ui.ActionRow(
+                        disnake.ui.StringSelect(
+                            custom_id="party_select:delete",
+                            placeholder="Выберите партию для удаления...",
+                            options=options
+                        )
+                    ),
+                    disnake.ui.ActionRow(
+                        disnake.ui.Button(
+                            label="Отмена",
+                            emoji="⬅️",
+                            style=disnake.ButtonStyle.secondary,
+                            custom_id="party_admin:cancel_delete"
+                        )
+                    )
+                ]
+                return await inter.response.edit_message(components=del_components)
+
+        # -----------------------------------------------------------
+        # 1. НАВИГАЦИЯ В АДМИН-ПАНЕЛИ ВЫБОРОВ
+        # -----------------------------------------------------------
+        if custom_id.startswith("el_nav:"):
+            if not inter.author.guild_permissions.administrator:
+                return await inter.response.send_message("⛔ Доступ разрешен только администраторам.", ephemeral=True)
+
+            parts = custom_id.split(":")
+            step = parts[1]
+
+            # ШАГ 1 -> ШАГ 2: Выбор уровня (Федеральные / Земельные)
+            if step == "level":
+                level = parts[2]
+                if level == "federal":
+                    embed = create_embed(
+                        title="🏛️ Федеральные выборы Резендии",
+                        description="Выберите тип федеральных выборов:\n\n• **👑 Президентские** (Кандидат в Президенты + Вице-президент)\n• **🏛️ Парламентские** (Политические партии)",
+                        color=disnake.Color.blue()
+                    )
+                    view = disnake.ui.View(timeout=180)
+                    view.add_item(disnake.ui.Button(
+                        label="Президентские",
+                        style=disnake.ButtonStyle.primary,
+                        emoji="👑",
+                        custom_id="el_nav:type:president"
+                    ))
+                    view.add_item(disnake.ui.Button(
+                        label="Парламентские",
+                        style=disnake.ButtonStyle.primary,
+                        emoji="🏛️",
+                        custom_id="el_nav:type:parliament"
+                    ))
+                    view.add_item(disnake.ui.Button(
+                        label="Назад",
+                        style=disnake.ButtonStyle.secondary,
+                        emoji="⬅️",
+                        custom_id="el_nav:back:root"
+                    ))
+                    return await inter.response.edit_message(embed=embed, view=view)
+
+                elif level == "regional":
+                    if not REGIONS_LIST:
+                        return await inter.response.edit_message(content="❌ Список регионов в конфигурации пуст.", embed=None, view=None)
+
+                    options = [
+                        disnake.SelectOption(label=reg, value=reg, emoji="📍")
+                        for reg in REGIONS_LIST[:25]
+                    ]
+                    embed = create_embed(
+                        title="📍 Земельные выборы (Выборы главы региона)",
+                        description="Выберите регион государства, в котором проводятся выборы главы:",
+                        color=disnake.Color.blue()
+                    )
+                    view = disnake.ui.View(timeout=180)
+                    select = disnake.ui.StringSelect(
+                        custom_id="el_nav_select:region",
+                        placeholder="Выберите регион для выборов",
+                        options=options
+                    )
+                    view.add_item(select)
+                    view.add_item(disnake.ui.Button(
+                        label="Назад",
+                        style=disnake.ButtonStyle.secondary,
+                        emoji="⬅️",
+                        custom_id="el_nav:back:root"
+                    ))
+                    return await inter.response.edit_message(embed=embed, view=view)
+
+            elif step == "back" and parts[2] == "root":
+                embed = create_embed(
+                    title="🗳️ Избирательная комиссия Резендии",
+                    description=(
+                        "Добро пожаловать в панель управления выборами.\n\n"
+                        "Выберите уровень выборов для настройки и проведения:\n"
+                        "• **🏛️ Федеральные** (Президентские / Парламентские)\n"
+                        "• **📍 Земельные** (Выборы глав регионов)"
+                    ),
+                    color=disnake.Color.blue()
+                )
+                view = disnake.ui.View(timeout=180)
+                view.add_item(disnake.ui.Button(
+                    label="Федеральные",
+                    style=disnake.ButtonStyle.primary,
+                    emoji="🏛️",
+                    custom_id="el_nav:level:federal"
+                ))
+                view.add_item(disnake.ui.Button(
+                    label="Земельные",
+                    style=disnake.ButtonStyle.secondary,
+                    emoji="📍",
+                    custom_id="el_nav:level:regional"
+                ))
+                return await inter.response.edit_message(embed=embed, view=view)
+
+            # ШАГ 2 -> ШАГ 3: Выбран тип выборов (Президентские / Парламентские)
+            elif step == "type":
+                el_type = parts[2]
+                return await self.show_election_action_menu(inter, el_type, target_region=None)
+
+        # -----------------------------------------------------------
+        # 2. ДЕЙСТВИЯ: РЕДАКТИРОВАТЬ / НАЧАТЬ / ЗАКОНЧИТЬ
+        # -----------------------------------------------------------
+        elif custom_id.startswith("el_act:"):
+            if not inter.author.guild_permissions.administrator:
+                return await inter.response.send_message("⛔ Доступ разрешен только администраторам.", ephemeral=True)
+
+            parts = custom_id.split(":")
+            action = parts[1]
+            el_type = parts[2]
+            target_region = parts[3] if len(parts) > 3 and parts[3] != "none" else None
+
+            election = await get_latest_election(el_type, target_region)
+            if not election:
+                eid = await create_election(el_type, target_region)
+                election = await get_election_by_id(eid)
+
+            election_id = election["id"]
+
+            # Действие: Редактировать список кандидатов / партий
+            if action == "edit":
+                try:
+                    candidates_data = json.loads(election["candidates"]) if election["candidates"] else []
+                except Exception:
+                    candidates_data = []
+
+                if el_type == "president":
+                    # Президентские: Кандидат в Президенты - Вице-президент
+                    cur_lines = []
+                    for c in candidates_data:
+                        if isinstance(c, dict):
+                            em_prefix = f"{c['emoji']} " if c.get("emoji") else ""
+                            cur_lines.append(f"{em_prefix}{c['candidate']} - {c.get('deputy', '')}")
+                        else:
+                            cur_lines.append(str(c))
+                    cur_text = "\n".join(cur_lines)
+                    modal = disnake.ui.Modal(
+                        title="Кандидаты: Президентские",
+                        custom_id=f"el_modal:edit_candidates:{election_id}",
+                        components=[
+                            disnake.ui.TextInput(
+                                label="Список: Кандидат - Вице-президент",
+                                placeholder="🚩 Иван Иванов - Петр Петров\n<:flag:123> Алексей Смирнов - Сергей Сидоров",
+                                value=cur_text[:4000],
+                                custom_id="candidates_raw",
+                                style=disnake.TextInputStyle.paragraph,
+                                required=True,
+                                max_length=4000
+                            )
+                        ]
+                    )
+                    return await inter.response.send_modal(modal=modal)
+
+                elif el_type == "parliament":
+                    # Парламентские: Политические партии
+                    cur_lines = []
+                    for c in candidates_data:
+                        if isinstance(c, dict):
+                            em_prefix = f"{c['emoji']} " if c.get("emoji") else ""
+                            cur_lines.append(f"{em_prefix}{c.get('candidate', '')}")
+                        else:
+                            cur_lines.append(str(c))
+                    if not cur_lines:
+                        parties = await get_all_parties()
+                        if parties:
+                            cur_lines = [f"{p.get('emoji', '')} {p['name']}".strip() for p in parties]
+                    cur_text = "\n".join(cur_lines)
+                    modal = disnake.ui.Modal(
+                        title="Партии: Парламентские выборы",
+                        custom_id=f"el_modal:edit_candidates:{election_id}",
+                        components=[
+                            disnake.ui.TextInput(
+                                label="Список партий (по одной в строке)",
+                                placeholder="🚩 Либеральная партия\n<:flag:123> Консервативная партия Резендии",
+                                value=cur_text[:4000],
+                                custom_id="candidates_raw",
+                                style=disnake.TextInputStyle.paragraph,
+                                required=True,
+                                max_length=4000
+                            )
+                        ]
+                    )
+                    return await inter.response.send_modal(modal=modal)
+
+                elif el_type == "regional":
+                    # Земельные: Кандидаты в главы региона (без зама)
+                    cur_lines = []
+                    for c in candidates_data:
+                        if isinstance(c, dict):
+                            em_prefix = f"{c['emoji']} " if c.get("emoji") else ""
+                            cur_lines.append(f"{em_prefix}{c.get('candidate', '')}")
+                        else:
+                            cur_lines.append(str(c))
+                    cur_text = "\n".join(cur_lines)
+                    modal = disnake.ui.Modal(
+                        title=f"Кандидаты: {target_region}"[:45],
+                        custom_id=f"el_modal:edit_candidates:{election_id}",
+                        components=[
+                            disnake.ui.TextInput(
+                                label=f"Кандидаты в главы {target_region}"[:45],
+                                placeholder="⭐ Иван Иванов\n<:flag:123> Петр Петров",
+                                value=cur_text[:4000],
+                                custom_id="candidates_raw",
+                                style=disnake.TextInputStyle.paragraph,
+                                required=True,
+                                max_length=4000
+                            )
+                        ]
+                    )
+                    return await inter.response.send_modal(modal=modal)
+
+            # Действие: Начать выборы
+            elif action == "start":
+                if election["status"] == "active":
+                    return await inter.response.send_message("ℹ️ Голосование уже активно!", ephemeral=True)
+
+                candidates = json.loads(election["candidates"]) if election["candidates"] else []
+                if not candidates:
+                    return await inter.response.send_message("❌ Сначала заполните список кандидатов/партий через кнопку «Редактировать»!", ephemeral=True)
+
+                # Запрашиваем ID канала для отправки объявления (модалка)
+                modal = disnake.ui.Modal(
+                    title="Запуск выборов",
+                    custom_id=f"el_modal:start_channel:{election_id}",
+                    components=[
+                        disnake.ui.TextInput(
+                            label="ID канала для объявления и голосования",
+                            placeholder="Например: 123456789012345678 (пусто = этот канал)",
+                            custom_id="channel_id_raw",
+                            style=disnake.TextInputStyle.short,
+                            required=False,
+                            max_length=30
+                        )
+                    ]
+                )
+                return await inter.response.send_modal(modal=modal)
+
+            # Действие: Закончить выборы
+            elif action == "finish":
+                if election["status"] != "active":
+                    return await inter.response.send_message("❌ Выборы не находятся в активной фазе голосования.", ephemeral=True)
+
+                await inter.response.defer(ephemeral=True)
+
+                # 1. Подсчет голосов
+                votes_summary = await get_election_votes_summary(election_id)
+                total_votes = sum(votes_summary.values())
+
+                candidates_data = json.loads(election["candidates"]) if election["candidates"] else []
+                cand_emoji_map = {}
+                default_icon = "👑" if el_type == "president" else ("🏛️" if el_type == "parliament" else "📍")
+                for c in candidates_data:
+                    if isinstance(c, dict):
+                        c_name = c.get("candidate", "")
+                        em = c.get("emoji") or default_icon
+                        if el_type == "president":
+                            dep = c.get("deputy", "")
+                            lbl = f"{c_name} (Вице: {dep})" if dep else c_name
+                        else:
+                            lbl = c_name
+                        cand_emoji_map[lbl] = em
+                        cand_emoji_map[c_name] = em
+
+                title_map = {
+                    "president": "👑 Официальные итоги Президентских выборов",
+                    "parliament": "🏛️ Официальные итоги Парламентских выборов",
+                    "regional": f"📍 Официальные итоги выборов главы региона «{target_region}»"
+                }
+
+                lines = []
+                lines.append(f"Всего проголосовало: **{total_votes}** избирателей.\n")
+
+                winner = None
+                winner_votes = -1
+
+                if not votes_summary:
+                    lines.append("*В голосовании не было отдано ни одного голоса.*")
+                else:
+                    lines.append("### Результаты голосования:")
+                    for candidate_name, count in votes_summary.items():
+                        percent = (count / total_votes * 100) if total_votes > 0 else 0.0
+                        c_icon = cand_emoji_map.get(candidate_name, default_icon)
+                        lines.append(f"• {c_icon} **{candidate_name}**: `{count}` голосов ({percent:.1f}%)")
+                        if count > winner_votes:
+                            winner_votes = count
+                            winner = candidate_name
+
+                    if winner:
+                        win_icon = cand_emoji_map.get(winner, "🏆")
+                        lines.append(f"\n🏆 **Победитель:** {win_icon} **{winner}** с результатом `{winner_votes}` голосов!")
+
+                title_text = title_map.get(el_type, "🗳️ Официальные итоги выборов")
+                result_content = f"### {title_text}\n\n" + "\n".join(lines)
+                result_components = [
+                    disnake.ui.Container(
+                        disnake.ui.TextDisplay(content=result_content)
+                    )
+                ]
+
+                # 2. Обновляем сообщение в канале выборов (публикуем итоги в контейнере)
+                if election["announcement_channel_id"] and election["announcement_message_id"]:
+                    ch = self.bot.get_channel(election["announcement_channel_id"])
+                    if ch:
+                        try:
+                            msg = await ch.fetch_message(election["announcement_message_id"])
+                            await msg.edit(content=None, embed=None, view=None, components=result_components)
+                        except Exception:
+                            pass
+
+                # 3. Переводим статус в finished
+                await update_election_status(election_id, "finished")
+
+                # 4. Обновляем панель управления
+                await self.show_election_action_menu(inter, el_type, target_region)
+                await inter.followup.send(content="✅ Выборы успешно завершены, итоги опубликованы!", ephemeral=True)
+
+        # -----------------------------------------------------------
+        # 3. КНОПКА ГОЛОСОВАНИЯ ДЛЯ ИЗБИРАТЕЛЕЙ
+        # -----------------------------------------------------------
+        elif custom_id.startswith("election_vote_btn:"):
+            election_id = int(custom_id.split(":")[1])
+            election = await get_election_by_id(election_id)
+            if not election:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="❌ Данные выборов не найдены."))],
+                    ephemeral=True
+                )
+
+            if election["status"] != "active":
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="⛔ Голосование на данных выборах уже завершено или не началось."))],
+                    ephemeral=True
+                )
+
+            if not await ensure_user_registered(inter, inter.author.id):
+                return
+
+            el_type = election["election_type"]
+            target_region = election["target_region"]
+
+            # Проверка прописки для Земельных выборов
+            if el_type == "regional":
+                user_reg = await get_user_region(inter.author.id)
+                if not user_reg or user_reg.strip().lower() != target_region.strip().lower():
+                    return await inter.response.send_message(
+                        components=[
+                            disnake.ui.Container(
+                                disnake.ui.TextDisplay(
+                                    content=f"⛔ **Отказано в доступе к голосованию!**\n\nВыборы проводятся исключительно для жителей региона **«{target_region}»**.\nВаша прописка: `{user_reg or 'Не указана'}`."
+                                )
+                            )
+                        ],
+                        ephemeral=True
+                    )
+
+            # Проверка: голосовал ли уже гражданин
+            if await has_user_voted_election(election_id, inter.author.id):
+                return await inter.response.send_message(
+                    components=[
+                        disnake.ui.Container(
+                            disnake.ui.TextDisplay(
+                                content="⚠️ **Вы уже приняли участие в данном голосовании!**\n\nПовторный голос строго запрещен законом."
+                            )
+                        )
+                    ],
+                    ephemeral=True
+                )
+
+            candidates_data = json.loads(election["candidates"]) if election["candidates"] else []
+            if not candidates_data:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="❌ Список кандидатов пуст."))],
+                    ephemeral=True
+                )
+
+            options = []
+            default_icon = "👑" if el_type == "president" else ("🏛️" if el_type == "parliament" else "📍")
+
+            for item in candidates_data[:25]:
+                if isinstance(item, dict):
+                    cand = item.get("candidate", "")
+                    item_emoji = item.get("emoji") or default_icon
+                    if el_type == "president":
+                        dep = item.get("deputy", "")
+                        label = f"{cand} (Вице: {dep})" if dep else cand
+                    else:
+                        label = cand
+
+                    try:
+                        opt = disnake.SelectOption(label=label[:100], value=label[:100], emoji=item_emoji)
+                    except Exception:
+                        opt = disnake.SelectOption(label=label[:100], value=label[:100], emoji=default_icon)
+                    options.append(opt)
+                else:
+                    options.append(disnake.SelectOption(label=str(item)[:100], value=str(item)[:100], emoji=default_icon))
+
+            modal = disnake.ui.Modal(
+                title="Бюллетень для голосования",
+                custom_id=f"el_modal:submit_vote:{election_id}",
+                components=[
+                    disnake.ui.Label(
+                        text="Ваш выбор в избирательном бюллетене",
+                        component=disnake.ui.StringSelect(
+                            custom_id="vote_choice",
+                            placeholder="Выберите кандидата / партию",
+                            options=options,
+                            min_values=1,
+                            max_values=1
+                        )
+                    )
+                ]
+            )
+            return await inter.response.send_modal(modal=modal)
+
+
+    @commands.Cog.listener("on_dropdown")
+    async def handle_election_dropdowns(self, inter: disnake.MessageInteraction):
+        if inter.component.custom_id == "party_select:delete":
+            if not inter.author.guild_permissions.administrator:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="⛔ Доступ разрешен только администраторам."))],
+                    ephemeral=True
+                )
+
+            try:
+                party_id = int(inter.values[0])
+            except (ValueError, IndexError):
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="❌ Некорректный ID партии."))],
+                    ephemeral=True
+                )
+
+            party = await get_party_by_id(party_id)
+            if not party:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="❌ Партия не найдена в базе данных."))],
+                    ephemeral=True
+                )
+
+            party_name = party["name"]
+            await delete_party(party_id)
+
+            components = await self.build_party_panel_components()
+            await inter.response.edit_message(components=components)
+            return await inter.followup.send(
+                components=[disnake.ui.Container(disnake.ui.TextDisplay(content=f"🗑️ Партия **«{party_name}»** успешно удалена из реестра."))],
+                ephemeral=True
+            )
+
+        if inter.component.custom_id == "el_nav_select:region":
+            if not inter.author.guild_permissions.administrator:
+                return await inter.response.send_message("⛔ Доступ разрешен только администраторам.", ephemeral=True)
+
+            selected_region = inter.values[0]
+            return await self.show_election_action_menu(inter, "regional", selected_region)
+
+
+    async def show_election_action_menu(self, inter: disnake.MessageInteraction, el_type: str, target_region: Optional[str] = None):
+        """Отображает Шаг 3: Меню с кнопками Редактировать и Начать/Закончить."""
+        election = await get_latest_election(el_type, target_region)
+        if not election:
+            eid = await create_election(el_type, target_region)
+            election = await get_election_by_id(eid)
+
+        election_id = election["id"]
+        status = election["status"]
+
+        candidates = json.loads(election["candidates"]) if election["candidates"] else []
+
+        type_names = {
+            "president": "👑 Президентские выборы",
+            "parliament": "🏛️ Парламентские выборы",
+            "regional": f"📍 Выборы главы региона «{target_region}»"
+        }
+        title_str = type_names.get(el_type, "Выборы")
+
+        status_text = {
+            "draft": "📝 Черновик (настройка)",
+            "active": "🟢 Идёт голосование",
+            "finished": "🏁 Завершены"
+        }.get(status, status)
+
+        cand_lines = []
+        default_icon = "👑" if el_type == "president" else ("🏛️" if el_type == "parliament" else "📍")
+        if not candidates:
+            cand_lines.append("*Список кандидатов/партий пуст.*")
+        else:
+            for idx, c in enumerate(candidates, 1):
+                if el_type == "president" and isinstance(c, dict):
+                    em = c.get("emoji") or default_icon
+                    cand_lines.append(f"{idx}. {em} **{c['candidate']}** (Вице: *{c.get('deputy', '—')}*)")
+                elif isinstance(c, dict):
+                    em = c.get("emoji") or default_icon
+                    cand_lines.append(f"{idx}. {em} **{c.get('candidate', '')}**")
+                else:
+                    cand_lines.append(f"{idx}. {default_icon} **{c}**")
+
+        desc = (
+            f"• **Статус:** {status_text}\n"
+            f"• **ID кампании:** `#{election_id}`\n\n"
+            f"**Зарегистрированные участники:**\n"
+            + "\n".join(cand_lines) + "\n\n"
+            f"Используйте кнопки ниже для редактирования или изменения статуса выборов."
+        )
+
+        embed = create_embed(title=title_str, description=desc, color=disnake.Color.blue())
+        view = disnake.ui.View(timeout=180)
+
+        reg_arg = target_region if target_region else "none"
+
+        view.add_item(disnake.ui.Button(
+            label="Редактировать",
+            style=disnake.ButtonStyle.primary,
+            emoji="✏️",
+            custom_id=f"el_act:edit:{el_type}:{reg_arg}"
+        ))
+
+        if status == "active":
+            view.add_item(disnake.ui.Button(
+                label="Закончить",
+                style=disnake.ButtonStyle.danger,
+                emoji="⏹️",
+                custom_id=f"el_act:finish:{el_type}:{reg_arg}"
+            ))
+        else:
+            view.add_item(disnake.ui.Button(
+                label="Начать",
+                style=disnake.ButtonStyle.success,
+                emoji="▶️",
+                custom_id=f"el_act:start:{el_type}:{reg_arg}"
+            ))
+
+        back_custom_id = "el_nav:level:federal" if el_type in ["president", "parliament"] else "el_nav:level:regional"
+        view.add_item(disnake.ui.Button(
+            label="Назад",
+            style=disnake.ButtonStyle.secondary,
+            emoji="⬅️",
+            custom_id=back_custom_id
+        ))
+
+        if inter.response.is_done():
+            await inter.edit_original_message(content=None, embed=embed, view=view)
+        else:
+            await inter.response.edit_message(content=None, embed=embed, view=view)
+
+
+    @commands.Cog.listener("on_modal_submit")
+    async def handle_election_modals(self, inter: disnake.ModalInteraction):
+        custom_id = inter.custom_id
+
+        # 0. Создание политической партии
+        if custom_id == "party_modal:create":
+            if not inter.author.guild_permissions.administrator:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="⛔ Доступ разрешен только администраторам."))],
+                    ephemeral=True
+                )
+
+            name = inter.text_values.get("party_name", "").strip()
+            emoji_raw = inter.text_values.get("party_emoji", "").strip()
+            leader_raw = inter.text_values.get("party_leader", "").strip()
+            desc = inter.text_values.get("party_desc", "").strip()
+
+            if not name:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="❌ Название партии не может быть пустым."))],
+                    ephemeral=True
+                )
+
+            existing = await get_party_by_name(name)
+            if existing:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content=f"❌ Партия с названием **«{name}»** уже зарегистрирована."))],
+                    ephemeral=True
+                )
+
+            em_val = None
+            if emoji_raw:
+                parsed_em, _ = self.parse_candidate_line(emoji_raw, inter.guild)
+                em_val = parsed_em or emoji_raw
+
+            leader_id = None
+            if leader_raw:
+                digits = re.findall(r'\d+', leader_raw)
+                if digits:
+                    leader_id = int(digits[0])
+
+            await create_party(name=name, emoji=em_val, description=desc, leader_id=leader_id)
+
+            components = await self.build_party_panel_components()
+            try:
+                await inter.response.edit_message(components=components)
+                return await inter.followup.send(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content=f"✅ Партия **«{name}»** успешно создана и внесена в реестр!"))],
+                    ephemeral=True
+                )
+            except Exception:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content=f"✅ Партия **«{name}»** успешно создана и внесена в реестр!"))],
+                    ephemeral=True
+                )
+
+        # 1. Сохранение списка кандидатов/партий
+        if custom_id.startswith("el_modal:edit_candidates:"):
+            election_id = int(custom_id.split(":")[2])
+            election = await get_election_by_id(election_id)
+            if not election:
+                return await inter.response.send_message("❌ Кампания выборов не найдена.", ephemeral=True)
+
+            raw_input = inter.text_values.get("candidates_raw", "").strip()
+            lines = [l.strip() for l in raw_input.split("\n") if l.strip()]
+
+            parsed_candidates = []
+            el_type = election["election_type"]
+
+            for line in lines:
+                em_val, rest = self.parse_candidate_line(line, inter.guild)
+                if el_type == "president":
+                    # Формат: Кандидат - Вице-президент
+                    if "-" in rest:
+                        parts = rest.split("-", 1)
+                        cand = parts[0].strip()
+                        dep = parts[1].strip()
+                    else:
+                        cand = rest.strip()
+                        dep = ""
+                    parsed_candidates.append({"candidate": cand, "deputy": dep, "emoji": em_val})
+                else:
+                    parsed_candidates.append({"candidate": rest.strip(), "emoji": em_val})
+
+            await update_election_candidates(election_id, parsed_candidates)
+            await inter.response.send_message(f"✅ Список успешно обновлен! Всего внесено: **{len(parsed_candidates)}** поз.", ephemeral=True, delete_after=10)
+
+            # Обновляем меню действий
+            return await self.show_election_action_menu(inter, election["election_type"], election["target_region"])
+
+        # 2. Запуск выборов в канале
+        elif custom_id.startswith("el_modal:start_channel:"):
+            election_id = int(custom_id.split(":")[2])
+            election = await get_election_by_id(election_id)
+            if not election:
+                return await inter.response.send_message("❌ Кампания выборов не найдена.", ephemeral=True)
+
+            raw_ch = inter.text_values.get("channel_id_raw", "").strip()
+            target_ch = inter.channel
+            if raw_ch:
+                ch_id = int(raw_ch.replace("<#", "").replace(">", ""))
+                found_ch = self.bot.get_channel(ch_id)
+                if found_ch:
+                    target_ch = found_ch
+
+            el_type = election["election_type"]
+            target_region = election["target_region"]
+            candidates = json.loads(election["candidates"]) if election["candidates"] else []
+
+            title_map = {
+                "president": "👑 Выборы Президента Резендии",
+                "parliament": "🏛️ Парламентские выборы Резендии",
+                "regional": f"📍 Выборы главы региона «{target_region}»"
+            }
+            title_text = title_map.get(el_type, "Выборы")
+
+            desc_lines = [
+                f"### {title_text}\n",
+                "Граждане Резендии! Официально объявлен старт всеобщего голосования.\n\n",
+                "**Зарегистрированные кандидаты / партии:**\n"
+            ]
+
+            default_icon = "👑" if el_type == "president" else ("🏛️" if el_type == "parliament" else "📍")
+            for idx, c in enumerate(candidates, 1):
+                if el_type == "president" and isinstance(c, dict):
+                    em = c.get("emoji") or default_icon
+                    desc_lines.append(f"{idx}. {em} **{c['candidate']}** (Вице-президент: *{c.get('deputy', '—')}*)\n")
+                elif isinstance(c, dict):
+                    em = c.get("emoji") or default_icon
+                    desc_lines.append(f"{idx}. {em} **{c.get('candidate', '')}**\n")
+                else:
+                    desc_lines.append(f"{idx}. {default_icon} **{c}**\n")
+
+            region_note = f"\n⚠️ *В голосовании могут участвовать только граждане с официальной пропиской в регионе «{target_region}».*\n" if el_type == "regional" else ""
+            desc_lines.append(f"\nНажмите кнопку ниже, чтобы открыть бюллетень и сделать свой выбор!{region_note}")
+
+            container_content = "".join(desc_lines)
+            components = [
+                disnake.ui.Container(
+                    disnake.ui.TextDisplay(content=container_content)
+                ),
+                disnake.ui.ActionRow(
+                    disnake.ui.Button(
+                        label="Проголосовать",
+                        style=disnake.ButtonStyle.success,
+                        emoji="🗳️",
+                        custom_id=f"election_vote_btn:{election_id}"
+                    )
+                )
+            ]
+
+            announcement_msg = await target_ch.send(components=components)
+            await update_election_status(election_id, "active", target_ch.id, announcement_msg.id)
+
+            await inter.response.send_message(f"✅ Выборы успешно запущены в канале {target_ch.mention}!", ephemeral=True, delete_after=10)
+            return await self.show_election_action_menu(inter, el_type, target_region)
+
+        # 3. Фиксация голоса гражданина
+        elif custom_id.startswith("el_modal:submit_vote:"):
+            election_id = int(custom_id.split(":")[2])
+            election = await get_election_by_id(election_id)
+            if not election or election["status"] != "active":
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="⛔ Голосование завершено или недоступно."))],
+                    ephemeral=True
+                )
+
+            # Проверка повторного голосования
+            if await has_user_voted_election(election_id, inter.author.id):
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="⚠️ Вы уже приняли участие в данном голосовании!"))],
+                    ephemeral=True
+                )
+
+            selected_choices = inter.values.get("vote_choice", [])
+            if not selected_choices:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="❌ Вы не выбрали кандидата."))],
+                    ephemeral=True
+                )
+
+            choice = selected_choices[0]
+
+            success = await add_election_vote(election_id, inter.author.id, choice)
+            if not success:
+                return await inter.response.send_message(
+                    components=[disnake.ui.Container(disnake.ui.TextDisplay(content="❌ Не удалось зафиксировать голос. Возможно, вы уже голосовали."))],
+                    ephemeral=True
+                )
+
+            # Ищем эмодзи выбранного кандидата / партии
+            choice_emoji = None
+            try:
+                cands_list = json.loads(election["candidates"]) if election["candidates"] else []
+                for c in cands_list:
+                    if isinstance(c, dict):
+                        cand_name = c.get("candidate", "")
+                        if election["election_type"] == "president":
+                            dep = c.get("deputy", "")
+                            lbl = f"{cand_name} (Вице: {dep})" if dep else cand_name
+                        else:
+                            lbl = cand_name
+                        if lbl == choice or cand_name == choice:
+                            choice_emoji = c.get("emoji")
+                            break
+            except Exception:
+                pass
+
+            em_display = f"{choice_emoji} " if choice_emoji else ""
+
+            # Персональный ответ избирателю в контейнере
+            vote_resp_components = [
+                disnake.ui.Container(
+                    disnake.ui.TextDisplay(
+                        content=f"✅ **Ваш голос учтен!**\n\nВы сделали выбор в пользу: {em_display}**{choice}**.\nСпасибо за исполнение гражданского долга!"
+                    )
+                )
+            ]
+            await inter.response.send_message(
+                components=vote_resp_components,
+                ephemeral=True
+            )
+
+            # Анонимное оповещение в канал выборов в контейнере
+            if election["announcement_channel_id"]:
+                ch = self.bot.get_channel(election["announcement_channel_id"])
+                if ch:
+                    try:
+                        alert_components = [
+                            disnake.ui.Container(
+                                disnake.ui.TextDisplay(
+                                    content=f"🗳️ Был отдан новый голос за: {em_display}**{choice}**!"
+                                )
+                            )
+                        ]
+                        await ch.send(
+                            components=alert_components,
+                            delete_after=120
+                        )
+                    except Exception:
+                        pass
 
 
 
