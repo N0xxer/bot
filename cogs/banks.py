@@ -132,6 +132,7 @@ class BanksCog(commands.Cog):
     async def process_deposit_payouts(self):
         """Периодическое начисление процентов по вкладам (раз в сутки)."""
         now = int(time.time())
+        updated_banks = set()
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("""
@@ -142,14 +143,21 @@ class BanksCog(commands.Cog):
             """, (now - 86400,)) as cursor:
                 deposits = await cursor.fetchall()
 
+            bank_balances = {}
             for dep in deposits:
+                bid = dep["bank_id"]
+                if bid not in bank_balances:
+                    bank_balances[bid] = dep["bank_balance"]
+
                 # Начисляем процент от суммы депозита
                 profit = max(1, int(dep["amount"] * (dep["interest_rate"] / 100)))
                 # Проверяем, есть ли у банка средства в казне на выплату процентов
-                if dep["bank_balance"] >= profit:
-                    await db.execute("UPDATE banks SET balance = balance - ? WHERE id = ?", (profit, dep["bank_id"]))
+                if bank_balances[bid] >= profit:
+                    bank_balances[bid] -= profit
+                    await db.execute("UPDATE banks SET balance = balance - ? WHERE id = ?", (profit, bid))
                     await db.execute("UPDATE bank_accounts SET balance = balance + ? WHERE account_number = ?", (profit, dep["account_number"]))
                     await db.execute("UPDATE bank_deposits SET last_payout_time = ? WHERE id = ?", (now, dep["id"]))
+                    updated_banks.add(bid)
 
                     await self.bank_money_logger(
                         bank_id=dep["bank_id"],
@@ -176,6 +184,19 @@ class BanksCog(commands.Cog):
                         except disnake.Forbidden:
                             pass
             await db.commit()
+
+        # Обновляем контрольные панели банков, у которых изменился баланс казны
+        for bid in updated_banks:
+            try:
+                b = await get_bank(bid)
+                if b and b["control_channel_id"] and b["control_message_id"]:
+                    ch = self.bot.get_channel(b["control_channel_id"])
+                    if ch:
+                        m = await ch.fetch_message(b["control_message_id"])
+                        comps = await self.build_bank_control_components(bid)
+                        await m.edit(components=comps)
+            except Exception:
+                pass
 
     @process_deposit_payouts.before_loop
     async def before_process_deposit_payouts(self):
@@ -995,6 +1016,21 @@ class BanksCog(commands.Cog):
         if dep["is_closed"]:
             return await inter.edit_original_message(content="ℹ️ Этот вклад уже закрыт.")
 
+        bank = await get_bank(dep["bank_id"])
+        if not bank:
+            return await inter.edit_original_message(content="❌ Банк не найден.")
+
+        # Проверяем наличие средств в казне банка для возврата тела вклада
+        if bank["balance"] < dep["amount"]:
+            return await inter.edit_original_message(
+                content=(
+                    f"❌ **В казне банка недостаточно средств для возврата вклада!**\n\n"
+                    f"• Требуется к выплате: `{format_number(dep['amount'])}` R$\n"
+                    f"• В казне банка «{dep['bank_name']}»: `{format_number(bank['balance'])}` R$\n\n"
+                    f"⚠️ Банк временно не может закрыть вклад из-за недостатка ликвидности. Свяжитесь с руководством банка."
+                )
+            )
+
         # Возвращаем тело депозита на счет
         account = await get_account_by_number(dep["account_number"])
         if not account or account["is_frozen"]:
@@ -1004,6 +1040,7 @@ class BanksCog(commands.Cog):
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("UPDATE bank_accounts SET balance = balance + ? WHERE account_number = ?", (dep["amount"], dep["account_number"]))
+            await db.execute("UPDATE banks SET balance = balance - ? WHERE id = ?", (dep["amount"], dep["bank_id"]))
             await db.execute("UPDATE bank_deposits SET is_closed = 1 WHERE id = ?", (dep_id,))
             await db.commit()
 
@@ -1013,14 +1050,24 @@ class BanksCog(commands.Cog):
             user1_id=inter.author.id,
             account1=dep["account_number"],
             amount=dep["amount"],
-            extra=f"Закрытие вклада #{dep_id}. Тело депозита ({format_number(dep['amount'])} R$) возвращено на счет {dep['account_number']}."
+            extra=f"Закрытие вклада #{dep_id}. Тело депозита ({format_number(dep['amount'])} R$) выплачено из казны банка на счет {dep['account_number']}."
         )
+
+        # Обновляем панель управления банка
+        comps = await self.build_bank_control_components(dep["bank_id"])
+        ctrl_ch = self.bot.get_channel(bank["control_channel_id"])
+        if ctrl_ch and bank["control_message_id"]:
+            try:
+                m = await ctrl_ch.fetch_message(bank["control_message_id"])
+                await m.edit(components=comps)
+            except Exception:
+                pass
 
         embed = create_embed(
             title="📈 Вклад успешно закрыт",
             description=(
                 f"Ваш вклад **#{dep_id}** в банке **«{dep['bank_name']}»** был успешно закрыт.\n\n"
-                f"💵 Тело вклада в размере `{format_number(dep['amount'])}` R$ возвращено на ваш счет `{dep['account_number']}`."
+                f"💵 Тело вклада в размере `{format_number(dep['amount'])}` R$ возвращено на ваш счет `{dep['account_number']}` из казны банка."
             ),
             color=disnake.Color.green()
         )
@@ -1594,10 +1641,11 @@ class BanksCog(commands.Cog):
                     delete_after=10
                 )
 
-            # Списываем средства со счета и открываем депозит
+            # Списываем средства со счета, пополняем казну банка и открываем депозит
             interest_rate = bank["deposit_interest_rate"] if "deposit_interest_rate" in bank.keys() else 3.0
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("UPDATE bank_accounts SET balance = balance - ? WHERE account_number = ?", (amount, acc_num))
+                await db.execute("UPDATE banks SET balance = balance + ? WHERE id = ?", (amount, bank_id))
                 await db.commit()
 
             dep_id = await create_bank_deposit(inter.author.id, bank_id, acc_num, amount, interest_rate)
@@ -1608,7 +1656,7 @@ class BanksCog(commands.Cog):
                 user1_id=inter.author.id,
                 account1=acc_num,
                 amount=amount,
-                extra=f"Открыт вклад #{dep_id} под {interest_rate}% в сутки. Списано со счета {acc_num}."
+                extra=f"Открыт вклад #{dep_id} под {interest_rate}% в сутки. Списано со счета {acc_num}, зачислено в казну банка."
             )
 
             # Обновляем панель банка
@@ -1630,7 +1678,7 @@ class BanksCog(commands.Cog):
                     f"**Сумма вклада:** `{format_number(amount)}` R$\n"
                     f"**Ставка:** `{interest_rate}%` в сутки (около `{format_number(daily_payout)}` R$/день)\n"
                     f"**Счет для начислений:** `{acc_num}`\n\n"
-                    f"💡 Проценты начисляются автоматически каждые 24 часа из казны банка.\n"
+                    f"💡 Средства поступили в оборот банка. Проценты начисляются автоматически каждые 24 часа из казны банка.\n"
                     f"Закрыть вклад и вернуть тело можно командой `/bank deposit_close`."
                 ),
                 color=disnake.Color.green()
