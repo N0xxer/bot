@@ -901,20 +901,32 @@ async def get_election_by_id(election_id: int) -> Optional[Dict[str, Any]]:
             return dict(row) if row else None
 
 async def get_latest_election(election_type: str, target_region: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Получить последние выборы заданного типа и региона."""
+    """Получить актуальные или последние выборы заданного типа и региона."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        status_order = "CASE status WHEN 'active' THEN 1 WHEN 'draft' THEN 2 ELSE 3 END, id DESC"
         if target_region:
-            query = "SELECT * FROM elections WHERE election_type = ? AND target_region = ? ORDER BY id DESC LIMIT 1"
+            query = f"SELECT * FROM elections WHERE election_type = ? AND target_region = ? ORDER BY {status_order} LIMIT 1"
             params = (election_type, target_region)
         else:
-            query = "SELECT * FROM elections WHERE election_type = ? ORDER BY id DESC LIMIT 1"
+            query = f"SELECT * FROM elections WHERE election_type = ? AND target_region IS NULL ORDER BY {status_order} LIMIT 1"
             params = (election_type,)
         async with db.execute(query, params) as cursor:
             row = await cursor.fetchone()
+            if not row and not target_region:
+                async with db.execute(f"SELECT * FROM elections WHERE election_type = ? ORDER BY {status_order} LIMIT 1", (election_type,)) as c2:
+                    row = await c2.fetchone()
             return dict(row) if row else None
 
-async def update_election_candidates(election_id: int, candidates: list):
+async def get_all_active_elections() -> list:
+    """Возвращает список всех активных выборов."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM elections WHERE status = 'active' ORDER BY id ASC") as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+async def update_election_candidates(election_id: int, candidates: Any):
     """Обновить список кандидатов/партий выборов."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE elections SET candidates = ? WHERE id = ?", (json.dumps(candidates, ensure_ascii=False), election_id))
