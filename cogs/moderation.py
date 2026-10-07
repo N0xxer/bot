@@ -20,51 +20,51 @@ class ModerationCog(commands.Cog):
         print(f"Участник {member} присоединился к серверу {member.guild.name}.")
 
     async def bot_slash_command_check(self, inter: disnake.ApplicationCommandInteraction) -> bool:
-#       """Глобальная проверка регистрации для всех слэш-команд."""
-#       # 1. Защита от вызова в ЛС (где нет guild_permissions)
-#       if not inter.guild or inter.author.guild_permissions.administrator:
-#           return True
-#
-#       # 2. Проверяем как базовое имя, так и полное имя с подкомандами
-#       cmd_name = inter.application_command.name
-#       full_cmd_name = getattr(inter.application_command, "qualified_name", cmd_name)
-#
-#       if cmd_name in ALLOWED_WITHOUT_REG or full_cmd_name in ALLOWED_WITHOUT_REG:
-#           return True
-#
-#       # 3. Проверка в БД
-#       registered = await is_user_registered(inter.author.id)
-#       if not registered:
-#           embed = create_embed(
-#               title="⛔ Доступ ограничен",
-#               description=(
-#                   "Вы не зарегистрированы в государственной системе!\n\n"
-#                   "Пройдите регистрацию в канале подачи анкет, "
-#                   "чтобы получить доступ к экономике, голосованию и взаимодействию с ботом."
-#               ),
-#               color=disnake.Color.red()
-#           )
-#           # Отвечаем, только если интеракция еще не была подтверждена/отвечена
-#           if not inter.response.is_done():
-#               await inter.response.send_message(embed=embed, ephemeral=True)
-#           return False
-#
-#       return True
+        """Глобальная проверка регистрации для всех слэш-команд."""
+        # 1. Защита от вызова в ЛС (где нет guild_permissions)
+        if not inter.guild or inter.author.guild_permissions.administrator:
+            return True
+ 
+        # 2. Проверяем как базовое имя, так и полное имя с подкомандами
+        cmd_name = inter.application_command.name
+        full_cmd_name = getattr(inter.application_command, "qualified_name", cmd_name)
+ 
+        if cmd_name in ALLOWED_WITHOUT_REG or full_cmd_name in ALLOWED_WITHOUT_REG:
+            return True
+ 
+        # 3. Проверка в БД
+        registered = await is_user_registered(inter.author.id)
+        if not registered:
+            embed = create_embed(
+                title="⛔ Доступ ограничен",
+                description=(
+                    "Вы не зарегистрированы в государственной системе!\n\n"
+                    "Пройдите регистрацию в канале подачи анкет, "
+                    "чтобы получить доступ к экономике, голосованию и взаимодействию с ботом."
+                ),
+                color=disnake.Color.red()
+            )
+            # Отвечаем, только если интеракция еще не была подтверждена/отвечена
+            if not inter.response.is_done():
+                await inter.response.send_message(embed=embed, ephemeral=True)
+            return False
+ 
+        return True
     
-        """Режим ЧП: блокировка всех команд с отправкой оповещения."""
-        embed = disnake.Embed(
-            title="⚠️ Внимание! Технические неполадки",
-            description=(
-                "Сервер временно недоступен или подвергся сбою.\n\n"
-                "Все команды заморожены на неопределенный срок. Все обращения направлять <@980162487250980895>"
-            ),
-            color=disnake.Color.red()
-        )
-
-        if not inter.response.is_done():
-            await inter.response.send_message(embed=embed, ephemeral=True)
-            
-        return False
+#       """Режим ЧП: блокировка всех команд с отправкой оповещения."""
+#       embed = disnake.Embed(
+#           title="⚠️ Внимание! Технические неполадки",
+#           description=(
+#               "Сервер временно недоступен или подвергся сбою.\n\n"
+#               "Все команды заморожены на неопределенный срок. Все обращения направлять <@980162487250980895>"
+#           ),
+#           color=disnake.Color.red()
+#       )
+#
+#       if not inter.response.is_done():
+#           await inter.response.send_message(embed=embed, ephemeral=True)
+#           
+#       return False
 
     @commands.slash_command(
         name="clear",

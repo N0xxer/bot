@@ -6,7 +6,7 @@ import time
 import aiosqlite
 import disnake
 from disnake.ext import commands
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -2544,7 +2544,7 @@ class PoliticsCog(commands.Cog):
                             "sancho": "Санчгоу"
                         }
                         if dist_id in reg_map:
-                            await set_user_region(inter.author.id, reg_map[dist_id])
+                            await update_user_info(inter.author.id, "region", reg_map[dist_id])
                             user_reg = reg_map[dist_id]
 
                 elif el_type == "governor":
@@ -2571,7 +2571,7 @@ class PoliticsCog(commands.Cog):
                             "sancho": "Санчгоу"
                         }
                         if target_region in reg_map:
-                            await set_user_region(inter.author.id, reg_map[target_region])
+                            await update_user_info(inter.author.id, "region", reg_map[target_region])
                             user_reg = reg_map[target_region]
 
                 elif el_type == "president":
